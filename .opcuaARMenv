@@ -1,0 +1,3 @@
+export MACHINE=armv7
+export ARCH=arm
+export CC=arm-linux-gnueabihf-gcc
