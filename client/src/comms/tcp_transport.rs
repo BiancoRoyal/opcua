@@ -19,40 +19,29 @@ use tokio_io::io::{self, ReadHalf, WriteHalf};
 use tokio_codec::FramedRead;
 use tokio_timer::Interval;
 
-use opcua_types::url::OPC_TCP_SCHEME;
-use opcua_types::status_code::StatusCode;
-use opcua_types::tcp_types::HelloMessage;
+use opcua_types::{
+    url::OPC_TCP_SCHEME,
+    status_code::StatusCode,
+    tcp_types::HelloMessage,
+};
 
-use opcua_core::prelude::*;
-use opcua_core::comms::tcp_codec::{Message, TcpCodec};
-use opcua_core::comms::message_writer::MessageWriter;
+use opcua_core::{
+    prelude::*,
+    comms::{
+        tcp_codec::{Message, TcpCodec},
+        message_writer::MessageWriter,
+    },
+};
 
 use crate::{
-    session_state::SessionState,
+    session_state::{SessionState, ConnectionState},
     message_queue::MessageQueue,
     callbacks::OnSessionClosed,
+    comms::transport::Transport,
 };
 
 macro_rules! connection_state {( $s:expr ) => { *trace_read_lock_unwrap!($s) } }
 macro_rules! set_connection_state {( $s:expr, $v:expr ) => { *trace_write_lock_unwrap!($s) = $v } }
-
-const WAIT_POLLING_TIMEOUT: u64 = 100;
-
-#[derive(Copy, Clone, PartialEq, Debug)]
-enum ConnectionState {
-    /// No connect has been made yet
-    NotStarted,
-    /// Connecting
-    Connecting,
-    /// Connection success
-    Connected,
-    // Waiting for ACK from the server
-    WaitingForAck,
-    // Connection is running
-    Processing,
-    // Connection is finished, possibly after an error
-    Finished(StatusCode),
-}
 
 struct ReadState {
     pub state: Arc<RwLock<ConnectionState>>,
@@ -69,7 +58,7 @@ impl Drop for ReadState {
 }
 
 impl ReadState {
-    fn turn_received_chunks_into_message(&mut self, chunks: &Vec<MessageChunk>) -> Result<SupportedMessage, StatusCode> {
+    fn turn_received_chunks_into_message(&mut self, chunks: &[MessageChunk]) -> Result<SupportedMessage, StatusCode> {
         // Validate that all chunks have incrementing sequence numbers and valid chunk types
         let secure_channel = trace_read_lock_unwrap!(self.secure_channel);
         self.last_received_sequence_number = Chunker::validate_chunks(self.last_received_sequence_number + 1, &secure_channel, chunks)?;
@@ -127,9 +116,9 @@ impl WriteState {
     fn send_request(&mut self, request: SupportedMessage) -> Result<u32, StatusCode> {
         match connection_state!(self.state) {
             ConnectionState::Processing => {
-                let mut secure_channel = trace_write_lock_unwrap!(self.secure_channel);
+                let secure_channel = trace_read_lock_unwrap!(self.secure_channel);
                 let request_id = self.send_buffer.next_request_id();
-                self.send_buffer.write(request_id, request, &mut secure_channel)
+                self.send_buffer.write(request_id, request, &secure_channel)
             }
             _ => {
                 panic!("Should not be calling this unless in the processing state");
@@ -144,7 +133,7 @@ impl WriteState {
 /// server. Requests are taken from the session state, responses are given to the session state.
 ///
 /// Reading and writing are split so they are independent of each other.
-pub struct TcpTransport {
+pub(crate) struct TcpTransport {
     /// Session state
     session_state: Arc<RwLock<SessionState>>,
     /// Secure channel information
@@ -161,13 +150,21 @@ impl Drop for TcpTransport {
     }
 }
 
+impl Transport for TcpTransport {}
+
 impl TcpTransport {
+    const WAIT_POLLING_TIMEOUT: u64 = 100;
+
     /// Create a new TCP transport layer for the session
     pub fn new(secure_channel: Arc<RwLock<SecureChannel>>, session_state: Arc<RwLock<SessionState>>, message_queue: Arc<RwLock<MessageQueue>>) -> TcpTransport {
+        let connection_state = {
+            let session_state = trace_read_lock_unwrap!(session_state);
+            session_state.connection_state()
+        };
         TcpTransport {
             session_state,
             secure_channel,
-            connection_state: Arc::new(RwLock::new(ConnectionState::NotStarted)),
+            connection_state,
             message_queue,
         }
     }
@@ -211,7 +208,7 @@ impl TcpTransport {
             }
         };
         assert_eq!(addr.port(), port);
-        assert!(addr.is_ipv4());
+
         // The connection will be serviced on its own thread. When the thread terminates, the connection
         // has also terminated.
 
@@ -257,7 +254,7 @@ impl TcpTransport {
                     // Still waiting for something to happen
                 }
             }
-            thread::sleep(Duration::from_millis(WAIT_POLLING_TIMEOUT))
+            thread::sleep(Duration::from_millis(Self::WAIT_POLLING_TIMEOUT))
         }
     }
 
@@ -272,7 +269,7 @@ impl TcpTransport {
                 }
                 _ => {}
             }
-            thread::sleep(Duration::from_millis(WAIT_POLLING_TIMEOUT))
+            thread::sleep(Duration::from_millis(Self::WAIT_POLLING_TIMEOUT))
         }
     }
 
@@ -340,7 +337,6 @@ impl TcpTransport {
             error!("Write bytes task error");
         })
     }
-
 
     fn spawn_finished_monitor_task(state: Arc<RwLock<ConnectionState>>, finished_flag: Arc<RwLock<bool>>) {
         // This task just spins around waiting for the connection to become finished. When it

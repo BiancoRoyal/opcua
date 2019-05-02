@@ -8,7 +8,7 @@
 //! None of this is for public consumption. The client is expected to recreate state automatically
 //! on a reconnect if necessary.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::marker::Sync;
 
@@ -39,7 +39,7 @@ pub struct MonitoredItem {
     id: u32,
     /// Monitored item's handle. Used internally - not modifiable
     client_handle: u32,
-    // Item to monitor
+    // The thing that is actually being monitored - the node id, attribute, index, encoding.
     item_to_monitor: ReadValueId,
     /// Queue size
     queue_size: u32,
@@ -51,6 +51,8 @@ pub struct MonitoredItem {
     sampling_interval: f64,
     /// Last value of the item
     value: DataValue,
+    /// Triggered items
+    triggered_items: BTreeSet<u32>,
 }
 
 impl MonitoredItem {
@@ -69,6 +71,7 @@ impl MonitoredItem {
             discard_oldest: false,
             value: DataValue::null(),
             client_handle,
+            triggered_items: BTreeSet::new(),
         }
     }
 
@@ -78,14 +81,14 @@ impl MonitoredItem {
         self.client_handle
     }
 
-    pub fn item_to_monitor(&self) -> ReadValueId { self.item_to_monitor.clone() }
+    pub fn item_to_monitor(&self) -> &ReadValueId { &self.item_to_monitor }
 
     pub fn sampling_interval(&self) -> f64 { self.sampling_interval }
 
     pub fn queue_size(&self) -> u32 { self.queue_size }
 
-    pub fn value(&self) -> DataValue {
-        self.value.clone()
+    pub fn value(&self) -> &DataValue {
+        &self.value
     }
 
     pub fn monitoring_mode(&self) -> MonitoringMode { self.monitoring_mode }
@@ -115,6 +118,15 @@ impl MonitoredItem {
     pub(crate) fn set_discard_oldest(&mut self, discard_oldest: bool) {
         self.discard_oldest = discard_oldest;
     }
+
+    pub(crate) fn set_triggering(&mut self, links_to_add: &[u32], links_to_remove: &[u32]) {
+        links_to_remove.iter().for_each(|i| { self.triggered_items.remove(i); });
+        links_to_add.iter().for_each(|i| { self.triggered_items.insert(*i); });
+    }
+
+    pub(crate) fn triggered_items(&self) -> &BTreeSet<u32> {
+        &self.triggered_items
+    }
 }
 
 pub struct Subscription {
@@ -134,7 +146,7 @@ pub struct Subscription {
     priority: u8,
     /// The change callback will be what is called if any monitored item changes within a cycle.
     /// The monitored item is referenced by its id
-    data_change_callback: Arc<Mutex<OnDataChange + Send + Sync + 'static>>,
+    data_change_callback: Arc<Mutex<OnDataChange + Send + Sync>>,
     /// A map of monitored items associated with the subscription (key = monitored_item_id)
     monitored_items: HashMap<u32, MonitoredItem>,
     /// A map of client handle to monitored item id
@@ -144,7 +156,7 @@ pub struct Subscription {
 impl Subscription {
     /// Creates a new subscription using the supplied parameters and the supplied data change callback.
     pub fn new(subscription_id: u32, publishing_interval: f64, lifetime_count: u32, max_keep_alive_count: u32, max_notifications_per_publish: u32,
-               publishing_enabled: bool, priority: u8, data_change_callback: Arc<Mutex<dyn OnDataChange + Send + Sync + 'static>>)
+               publishing_enabled: bool, priority: u8, data_change_callback: Arc<Mutex<dyn OnDataChange + Send + Sync>>)
                -> Subscription
     {
         Subscription {
@@ -177,7 +189,7 @@ impl Subscription {
 
     pub fn priority(&self) -> u8 { self.priority }
 
-    pub fn data_change_callback(&self) -> Arc<Mutex<dyn OnDataChange + Send + Sync + 'static>> { self.data_change_callback.clone() }
+    pub fn data_change_callback(&self) -> Arc<Mutex<dyn OnDataChange + Send + Sync>> { self.data_change_callback.clone() }
 
     pub(crate) fn set_publishing_interval(&mut self, publishing_interval: f64) { self.publishing_interval = publishing_interval; }
 
@@ -209,7 +221,7 @@ impl Subscription {
     }
 
     pub(crate) fn modify_monitored_items(&mut self, items_to_modify: &[ModifyMonitoredItem]) {
-        items_to_modify.into_iter().for_each(|i| {
+        items_to_modify.iter().for_each(|i| {
             if let Some(ref mut monitored_item) = self.monitored_items.get_mut(&i.id) {
                 monitored_item.set_sampling_interval(i.sampling_interval);
                 monitored_item.set_queue_size(i.queue_size);
@@ -226,12 +238,14 @@ impl Subscription {
         })
     }
 
-    fn monitored_item_id_from_handle(&self, client_handle: u32) -> Option<u32> {
-        if let Some(monitored_item_id) = self.client_handles.get(&client_handle) {
-            Some(*monitored_item_id)
-        } else {
-            None
+    pub(crate) fn set_triggering(&mut self, triggering_item_id: u32, links_to_add: &[u32], links_to_remove: &[u32]) {
+        if let Some(ref mut monitored_item) = self.monitored_items.get_mut(&triggering_item_id) {
+            monitored_item.set_triggering(links_to_add, links_to_remove);
         }
+    }
+
+    fn monitored_item_id_from_handle(&self, client_handle: u32) -> Option<u32> {
+        self.client_handles.get(&client_handle).map(|monitored_item_id| *monitored_item_id)
     }
 
     pub(crate) fn data_change(&mut self, data_change_notifications: &[DataChangeNotification]) {
@@ -246,7 +260,6 @@ impl Subscription {
                         }
                         *monitored_item_id.as_ref().unwrap()
                     };
-
                     let monitored_item = self.monitored_items.get_mut(&monitored_item_id).unwrap();
                     monitored_item.value = i.value.clone();
                     monitored_item_ids.insert(monitored_item_id);

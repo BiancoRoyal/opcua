@@ -7,6 +7,7 @@ use chrono;
 use opcua_core::{
     comms::secure_channel::SecureChannel,
     crypto::SecurityPolicy,
+    handle::Handle,
 };
 
 use opcua_types::{
@@ -17,64 +18,29 @@ use opcua_types::{
 
 use crate::{message_queue::MessageQueue, callbacks::OnSessionClosed};
 
-/// A simple handle factory for incrementing sequences of numbers.
-struct Handle {
-    next: u32,
-    first: u32,
-}
-
-impl Handle {
-    /// Creates a new handle factory, that starts with the supplied number
-    pub fn new(first: u32) -> Handle {
-        Handle {
-            next: first,
-            first,
-        }
-    }
-
-    /// Returns the next handle to be issued, internally incrementing each time so the handle
-    /// is always different until it wraps back to the start.
-    pub fn next(&mut self) -> u32 {
-        let next = self.next;
-        // Increment next
-        if self.next == u32::MAX {
-            self.next = self.first;
-        } else {
-            self.next += 1;
-        }
-        next
-    }
-
-    /// Resets the handle to its initial state
-    pub fn reset(&mut self) {
-        self.next = self.first;
-    }
-}
-
-#[test]
-fn handle_test() {
-    // Expect sequential handles
-    let mut h = Handle::new(0);
-    assert_eq!(h.next(), 0);
-    assert_eq!(h.next(), 1);
-    assert_eq!(h.next(), 2);
-    let mut h = Handle::new(100);
-    assert_eq!(h.next(), 100);
-    assert_eq!(h.next(), 101);
-
-    // Simulate wrapping around
-    let mut h = Handle::new(u32::MAX - 2);
-    assert_eq!(h.next(), u32::MAX - 2);
-    assert_eq!(h.next(), u32::MAX - 1);
-    assert_eq!(h.next(), u32::MAX);
-    assert_eq!(h.next(), u32::MAX - 2);
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum ConnectionState {
+    /// No connect has been made yet
+    NotStarted,
+    /// Connecting
+    Connecting,
+    /// Connection success
+    Connected,
+    // Waiting for ACK from the server
+    WaitingForAck,
+    // Connection is running
+    Processing,
+    // Connection is finished, possibly after an error
+    Finished(StatusCode),
 }
 
 /// Session's state indicates connection status, negotiated times and sizes,
 /// and security tokens.
-pub struct SessionState {
+pub(crate) struct SessionState {
     /// Secure channel information
     secure_channel: Arc<RwLock<SecureChannel>>,
+    /// Connection state - what the session's connection is currently doing
+    connection_state: Arc<RwLock<ConnectionState>>,
     /// The request timeout is how long the session will wait from sending a request expecting a response
     /// if no response is received the rclient will terminate.
     request_timeout: u32,
@@ -133,6 +99,7 @@ impl SessionState {
     pub fn new(secure_channel: Arc<RwLock<SecureChannel>>, message_queue: Arc<RwLock<MessageQueue>>) -> SessionState {
         SessionState {
             secure_channel,
+            connection_state: Arc::new(RwLock::new(ConnectionState::NotStarted)),
             request_timeout: Self::DEFAULT_REQUEST_TIMEOUT,
             send_buffer_size: Self::SEND_BUFFER_SIZE,
             receive_buffer_size: Self::RECEIVE_BUFFER_SIZE,
@@ -192,6 +159,10 @@ impl SessionState {
         self.session_closed_callback = Some(Box::new(session_closed_callback));
     }
 
+    pub(crate) fn connection_state(&self) -> Arc<RwLock<ConnectionState>> {
+        self.connection_state.clone()
+    }
+
     pub fn wait_for_publish_response(&self) -> bool {
         self.wait_for_publish_response
     }
@@ -208,7 +179,7 @@ impl SessionState {
     /// Construct a request header for the session. All requests after create session are expected
     /// to supply an authentication token.
     pub fn make_request_header(&mut self) -> RequestHeader {
-        let request_header = RequestHeader {
+        RequestHeader {
             authentication_token: self.authentication_token.clone(),
             timestamp: DateTime::now(),
             request_handle: self.request_handle.next(),
@@ -216,12 +187,10 @@ impl SessionState {
             audit_entry_id: UAString::null(),
             timeout_hint: self.request_timeout,
             additional_header: ExtensionObject::null(),
-        };
-        request_header
+        }
     }
 
     /// Sends a publish request containing acknowledgements for previous notifications.
-    /// TODO this function needs to be refactored as an asynchronous operation.
     pub fn async_publish(&mut self, subscription_acknowledgements: &[SubscriptionAcknowledgement]) -> Result<u32, StatusCode> {
         debug!("async_publish with {} subscription acknowledgements", subscription_acknowledgements.len());
         let request = PublishRequest {

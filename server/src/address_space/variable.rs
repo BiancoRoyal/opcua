@@ -1,14 +1,17 @@
 use std::sync::{Arc, Mutex};
-use std::convert::Into;
+use std::convert::{Into, TryFrom};
 
 use opcua_types::node_ids::DataTypeId;
 
-use crate::address_space::{
-    AttributeGetter, AttributeSetter,
-    AccessLevel, UserAccessLevel,
-    base::Base,
-    node::Node,
+use crate::{
+    callbacks::{AttributeGetter, AttributeSetter},
+    address_space::{
+        AccessLevel, UserAccessLevel,
+        base::Base,
+        node::{Node, NodeAttributes},
+    },
 };
+use opcua_types::service_types::VariableAttributes;
 
 /// This is a builder object for constructing variable nodes programmatically.
 pub struct VariableBuilder {
@@ -19,23 +22,23 @@ macro_rules! node_builder_impl {
     ( $node_builder_struct:ident ) => {
         impl $node_builder_struct {
 
-            fn node_id(mut self, node_id: &NodeId) -> Self {
+            fn node_id(mut self, node_id: NodeId) -> Self {
                 let _ = self.node.base.set_node_id(node_id);
                 self
             }
 
-            pub fn display_name(mut self, display_name: &str) -> Self {
-                let _ = self.node.base.set_display_name(LocalizedText::new("", display_name));
+            pub fn browse_name<V>(mut self, browse_name: V) -> Self where V: Into<QualifiedName> {
+                let _ = self.node.base.set_browse_name(browse_name);
                 self
             }
 
-            pub fn browse_name(mut self, browse_name: &str) -> Self {
-                let _ = self.node.base.set_browse_name(QualifiedName::new(0, browse_name));
+            pub fn display_name<V>(mut self, display_name: V) -> Self where V: Into<LocalizedText> {
+                self.node.set_display_name(display_name.into());
                 self
             }
 
-            pub fn description(mut self, description: &str) -> Self {
-                let _ = self.node.base.set_description(LocalizedText::new("", description));
+            pub fn description<V>(mut self, description: V) -> Self where V: Into<LocalizedText>{
+                self.node.set_description(description.into());
                 self
             }
         }
@@ -48,51 +51,50 @@ impl VariableBuilder {
     pub fn new(node_id: &NodeId) -> VariableBuilder {
         VariableBuilder {
             node: Variable::default()
-        }.node_id(node_id)
+        }.node_id(node_id.clone())
     }
 
     pub fn is_valid(&self) -> bool {
         self.node.is_valid()
     }
 
-    pub fn value<V>(mut self, value: V) -> Self where V: Into<DataValue> {
+    pub fn value<V>(mut self, value: V) -> Self where V: Into<Variant> {
         let _ = self.node.set_value(value);
         self
     }
 
-    pub fn data_type(mut self, data_type: DataTypeId) -> Self {
-        let node_id: NodeId = data_type.into();
-        let _ = self.node.set_attribute(AttributeId::DataType, Variant::from(node_id).into());
+    pub fn data_type<T>(mut self, data_type: T) -> Self where T: Into<NodeId> {
+        self.node.set_data_type(data_type);
         self
     }
 
     pub fn historizing(mut self, historizing: bool) -> Self {
-        let _ = self.node.set_attribute(AttributeId::Historizing, Variant::Boolean(historizing).into());
+        self.node.set_historizing(historizing);
         self
     }
 
     pub fn access_level(mut self, access_level: AccessLevel) -> Self {
-        let _ = self.node.set_attribute(AttributeId::AccessLevel, Variant::Byte(access_level.bits).into());
+        self.node.set_access_level(access_level);
         self
     }
 
     pub fn user_access_level(mut self, user_access_level: UserAccessLevel) -> Self {
-        let _ = self.node.set_attribute(AttributeId::UserAccessLevel, Variant::Byte(user_access_level.bits).into());
+        self.node.set_user_access_level(user_access_level);
         self
     }
 
     pub fn value_rank(mut self, value_rank: i32) -> Self {
-        let _ = self.node.set_attribute(AttributeId::ValueRank, Variant::Int32(value_rank).into());
+        self.node.set_value_rank(value_rank);
         self
     }
 
     pub fn array_dimensions(mut self, array_dimensions: &[u32]) -> Self {
-        let _ = self.node.set_attribute(AttributeId::ArrayDimensions, Variant::from(array_dimensions).into());
+        self.node.set_array_dimensions(array_dimensions);
         self
     }
 
-    pub fn minimum_sampling_interval(mut self, minimum_sampling_interval: i32) -> Self {
-        let _ = self.node.set_attribute(AttributeId::MinimumSamplingInterval, Variant::Int32(minimum_sampling_interval).into());
+    pub fn minimum_sampling_interval(mut self, minimum_sampling_interval: f64) -> Self {
+        self.node.set_minimum_sampling_interval(minimum_sampling_interval);
         self
     }
 
@@ -106,65 +108,221 @@ impl VariableBuilder {
     }
 }
 
-#[derive(Debug)]
+// Note we use derivative builder macro so we can skip over the value getter / setter
+
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct Variable {
     base: Base,
+    data_type: NodeId,
+    historizing: bool,
+    value_rank: i32,
+    value: DataValue,
+    access_level: u8,
+    user_access_level: u8,
+    array_dimensions: Option<Vec<u32>>,
+    minimum_sampling_interval: Option<f64>,
+    #[derivative(Debug = "ignore")]
+    value_setter: Option<Arc<Mutex<dyn AttributeSetter + Send>>>,
+    #[derivative(Debug = "ignore")]
+    value_getter: Option<Arc<Mutex<dyn AttributeGetter + Send>>>,
 }
 
 node_impl!(Variable);
 
 impl Default for Variable {
     fn default() -> Self {
-        let data_type_node_id: NodeId = DataTypeId::Int32.into();
+        let data_type: NodeId = DataTypeId::Int32.into();
         Variable {
-            base: Base::new(NodeClass::Variable, &NodeId::null(), "", "", "", vec![
-                (AttributeId::UserAccessLevel, Variant::Byte(AccessLevel::CURRENT_READ.bits)),
-                (AttributeId::AccessLevel, Variant::Byte(UserAccessLevel::CURRENT_READ.bits)),
-                (AttributeId::DataType, Variant::from(data_type_node_id)),
-                (AttributeId::Historizing, Variant::Boolean(false)),
-                (AttributeId::ValueRank, Variant::Int32(-1)),
-                (AttributeId::Value, Variant::Empty)
-            ]),
+            base: Base::new(NodeClass::Variable, &NodeId::null(), "", ""),
+            data_type,
+            historizing: false,
+            value_rank: -1,
+            value: Variant::Empty.into(),
+            access_level: 0,
+            user_access_level: 0,
+            array_dimensions: None,
+            minimum_sampling_interval: None,
+            value_getter: None,
+            value_setter: None,
+        }
+    }
+}
+
+impl NodeAttributes for Variable {
+    fn get_attribute(&self, attribute_id: AttributeId, max_age: f64) -> Option<DataValue> {
+        self.base.get_attribute(attribute_id, max_age).or_else(|| {
+            if attribute_id == AttributeId::Value {
+                Some(self.value())
+            } else {
+                match attribute_id {
+                    // Mandatory attributes
+                    AttributeId::DataType => Some(Variant::from(self.data_type())),
+                    AttributeId::Historizing => Some(Variant::from(self.historizing())),
+                    AttributeId::ValueRank => Some(Variant::from(self.value_rank())),
+                    AttributeId::AccessLevel => Some(Variant::from(self.access_level().bits())),
+                    AttributeId::UserAccessLevel => Some(Variant::from(self.user_access_level().bits())),
+                    // Optional attributes
+                    AttributeId::ArrayDimensions => {
+                        if let Some(ref array_dimensions) = self.array_dimensions() {
+                            Some(Variant::from(array_dimensions))
+                        } else {
+                            None
+                        }
+                    }
+                    AttributeId::MinimumSamplingInterval => {
+                        if let Some(minimum_sampling_interval) = self.minimum_sampling_interval() {
+                            Some(Variant::from(minimum_sampling_interval))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None
+                }.map(|v| v.into())
+            }
+        })
+    }
+
+    fn set_attribute(&mut self, attribute_id: AttributeId, value: Variant) -> Result<(), StatusCode> {
+        if let Some(value) = self.base.set_attribute(attribute_id, value)? {
+            match attribute_id {
+                AttributeId::DataType => if let Variant::NodeId(v) = value {
+                    self.set_data_type(*v);
+                    Ok(())
+                } else {
+                    Err(StatusCode::BadTypeMismatch)
+                },
+                AttributeId::Historizing => if let Variant::Boolean(v) = value {
+                    self.set_historizing(v);
+                    Ok(())
+                } else {
+                    Err(StatusCode::BadTypeMismatch)
+                },
+                AttributeId::ValueRank => if let Variant::Int32(v) = value {
+                    self.set_value_rank(v);
+                    Ok(())
+                } else {
+                    Err(StatusCode::BadTypeMismatch)
+                },
+                AttributeId::Value => {
+                    self.set_value(value);
+                    Ok(())
+                }
+                AttributeId::AccessLevel => if let Variant::Byte(v) = value {
+                    self.set_access_level(AccessLevel::from_bits_truncate(v));
+                    Ok(())
+                } else {
+                    Err(StatusCode::BadTypeMismatch)
+                },
+                AttributeId::UserAccessLevel => if let Variant::Byte(v) = value {
+                    self.set_user_access_level(UserAccessLevel::from_bits_truncate(v));
+                    Ok(())
+                } else {
+                    Err(StatusCode::BadTypeMismatch)
+                },
+                AttributeId::ArrayDimensions => {
+                    let array_dimensions = <Vec<u32>>::try_from(&value);
+                    if let Ok(array_dimensions) = array_dimensions {
+                        self.set_array_dimensions(&array_dimensions);
+                        Ok(())
+                    } else {
+                        Err(StatusCode::BadTypeMismatch)
+                    }
+                }
+                AttributeId::MinimumSamplingInterval => if let Variant::Double(v) = value {
+                    self.set_minimum_sampling_interval(v);
+                    Ok(())
+                } else {
+                    Err(StatusCode::BadTypeMismatch)
+                },
+                _ => Err(StatusCode::BadAttributeIdInvalid)
+            }
+        } else {
+            Ok(())
         }
     }
 }
 
 impl Variable {
-    pub fn new<V>(node_id: &NodeId, browse_name: &str, display_name: &str, description: &str, value: V) -> Variable where V: Into<Variant> {
-        let value = DataValue::new(value);
-        let data_type = value.value.as_ref().unwrap().data_type();
+    /// Creates a new variable. Note that data type, value rank and historizing are mandatory
+    /// attributes of the Variable but not required by the constructor. The data type and value rank
+    /// are inferred from the value. Historizing is not supported so is always false. If the
+    /// inferred types for data type or value rank are wrong, they may be explicitly set, or
+    /// call `new_data_value()` instead.
+    pub fn new<R, S, V>(node_id: &NodeId, browse_name: R, display_name: S, value: V) -> Variable
+        where R: Into<QualifiedName>,
+              S: Into<LocalizedText>,
+              V: Into<Variant>
+    {
+        let value = value.into();
+        let data_type = value.data_type();
         if let Some(data_type) = data_type {
-            Variable::new_data_value(node_id, browse_name, display_name, description, data_type, value)
+            Variable::new_data_value(node_id, browse_name, display_name, data_type, value)
         } else {
             panic!("Data type cannot be inferred from the value, use another constructor such as new_data_value")
         }
     }
 
-    pub fn new_with_data_type<V>(node_id: &NodeId, browse_name: &str, display_name: &str, description: &str, data_type: DataTypeId, value: V) -> Variable where V: Into<Variant> {
-        Variable::new_data_value(node_id, browse_name, display_name, description, data_type, DataValue::new(value))
+    pub fn from_attributes<S>(node_id: &NodeId, browse_name: S, attributes: VariableAttributes) -> Result<Self, ()>
+        where S: Into<QualifiedName>
+    {
+        let mandatory_attributes = AttributesMask::DISPLAY_NAME | AttributesMask::ACCESS_LEVEL | AttributesMask::USER_ACCESS_LEVEL |
+            AttributesMask::DATA_TYPE | AttributesMask::HISTORIZING | AttributesMask::VALUE | AttributesMask::VALUE_RANK;
+        let mask = AttributesMask::from_bits(attributes.specified_attributes).ok_or(())?;
+        if mask.contains(mandatory_attributes) {
+            let mut node = Self::new_data_value(node_id, browse_name, attributes.display_name, attributes.data_type, attributes.value);
+            node.set_value_rank(attributes.value_rank);
+            node.set_historizing(attributes.historizing);
+            node.set_access_level(AccessLevel::from_bits_truncate(attributes.access_level));
+            node.set_user_access_level(UserAccessLevel::from_bits_truncate(attributes.user_access_level));
+
+            if mask.contains(AttributesMask::DESCRIPTION) {
+                node.set_description(attributes.description);
+            }
+            if mask.contains(AttributesMask::WRITE_MASK) {
+                node.set_write_mask(WriteMask::from_bits_truncate(attributes.write_mask));
+            }
+            if mask.contains(AttributesMask::USER_WRITE_MASK) {
+                node.set_user_write_mask(WriteMask::from_bits_truncate(attributes.user_write_mask));
+            }
+            if mask.contains(AttributesMask::ARRAY_DIMENSIONS) {
+                node.set_array_dimensions(attributes.array_dimensions.unwrap().as_slice());
+            }
+            if mask.contains(AttributesMask::MINIMUM_SAMPLING_INTERVAL) {
+                node.set_minimum_sampling_interval(attributes.minimum_sampling_interval);
+            }
+            Ok(node)
+        } else {
+            error!("Variable cannot be created from attributes - missing mandatory values");
+            Err(())
+        }
+    }
+
+    pub fn new_with_data_type<V>(node_id: &NodeId, browse_name: &str, display_name: &str, data_type: DataTypeId, value: V) -> Variable where V: Into<Variant> {
+        Variable::new_data_value(node_id, browse_name, display_name, data_type, value)
     }
 
     /// Constructs a new variable with the specified id, name, type and value
-    pub fn new_data_value(node_id: &NodeId, browse_name: &str, display_name: &str, description: &str, data_type: DataTypeId, value: DataValue) -> Variable {
-        let array_dimensions = if let Some(ref value) = value.value {
-            // Get the
-            match value {
-                &Variant::Array(ref values) => Some(vec![values.len() as u32]),
-                &Variant::MultiDimensionArray(ref values) => {
-                    // Multidimensional arrays encode/decode dimensions with Int32 in Part 6, but arrayDimensions in Part 3
-                    // wants them as u32. Go figure... So convert Int32 to u32
-                    Some(values.dimensions.iter().map(|v| *v as u32).collect::<Vec<u32>>())
-                }
-                _ => None
+    pub fn new_data_value<S, R, N, V>(node_id: &NodeId, browse_name: R, display_name: S, data_type: N, value: V) -> Variable
+        where R: Into<QualifiedName>,
+              S: Into<LocalizedText>,
+              N: Into<NodeId>,
+              V: Into<Variant>
+    {
+        let value = value.into();
+        let array_dimensions = match value {
+            Variant::Array(ref values) => Some(vec![values.len() as u32]),
+            Variant::MultiDimensionArray(ref values) => {
+                // Multidimensional arrays encode/decode dimensions with Int32 in Part 6, but arrayDimensions in Part 3
+                // wants them as u32. Go figure... So convert Int32 to u32
+                Some(values.dimensions.iter().map(|v| *v as u32).collect::<Vec<u32>>())
             }
-        } else {
-            None
+            _ => None
         };
 
         let builder = VariableBuilder::new(node_id)
             .display_name(display_name)
             .browse_name(browse_name)
-            .description(description)
             .user_access_level(UserAccessLevel::CURRENT_READ)
             .access_level(AccessLevel::CURRENT_READ)
             .data_type(data_type)
@@ -185,37 +343,64 @@ impl Variable {
     }
 
     pub fn value(&self) -> DataValue {
-        self.base.find_attribute(AttributeId::Value).unwrap()
+        if let Some(ref value_getter) = self.value_getter {
+            let mut value_getter = value_getter.lock().unwrap();
+            value_getter.get(&self.node_id(), AttributeId::Value, 0f64).unwrap().unwrap()
+        } else {
+            self.value.clone().into()
+        }
     }
 
-    /// Sets the variable's value
-    pub fn set_value<V>(&mut self, value: V) where V: Into<DataValue> {
-        // TODO if the value is an array or multi-dimensional array, should we
-        //  set array dimensions / value rank?
-        let _ = self.base.set_attribute(AttributeId::Value, value.into());
+    /// Sets the variable's `Variant` value. The timestamps for the change are updated to now.
+    pub fn set_value<V>(&mut self, value: V) where V: Into<Variant> {
+        let value = value.into();
+        // The value set to the value getter
+        if let Some(ref value_setter) = self.value_setter {
+            let mut value_setter = value_setter.lock().unwrap();
+            let value = value.into();
+            let data_value = if let Variant::DataValue(value) = value {
+                // A variant containing a datavalue is treated as though that should be
+                // the datavalue to set.
+                *value
+            } else {
+                value.into()
+            };
+            let _ = value_setter.set(&self.node_id(), AttributeId::Value, data_value);
+        } else {
+            let now = DateTime::now();
+            let value = if let Variant::DataValue(value) = value {
+                value.value.unwrap_or(Variant::Empty)
+            } else {
+                value
+            };
+            self.set_value_direct(value, &now, &now);
+        }
     }
 
-    /// Sets the variable's value directly but first test to see if it has changed. If the value has not
-    /// changed the existing timestamps are preserved.
-    pub fn set_value_direct<V>(&mut self, value: V, source_timestamp: &DateTime, server_timestamp: &DateTime) where V: Into<Variant> {
-        let _ = self.base.set_attribute(AttributeId::Value, DataValue::from((value.into(), source_timestamp, server_timestamp)));
+    /// Sets the variable's `DataValue`
+    pub fn set_value_direct<V>(&mut self, value: V, server_timestamp: &DateTime, source_timestamp: &DateTime) where V: Into<Variant> {
+        self.value.value = Some(value.into());
+        self.value.server_timestamp = Some(server_timestamp.clone());
+        self.value.source_timestamp = Some(source_timestamp.clone());
     }
 
-    /// Sets a getter function that will be called to get the value of this variable.
-    pub fn set_value_getter(&mut self, getter: Arc<Mutex<dyn AttributeGetter + Send>>) {
-        self.base.set_attribute_getter(AttributeId::Value, getter);
+    /// Sets a getter function that will be called to get the value of this variable. Note
+    /// you most likely want to set the corresponding setter too otherwise you will never get back
+    /// the values you set otherwise.
+    pub fn set_value_getter(&mut self, value_getter: Arc<Mutex<dyn AttributeGetter + Send>>) {
+        self.value_getter = Some(value_getter);
     }
 
     /// Sets a setter function that will be called to set the value of this variable. Note
     /// you most likely want to set the corresponding getter too otherwise you will never get back
     /// the values you set otherwise.
-    pub fn set_value_setter(&mut self, setter: Arc<Mutex<dyn AttributeSetter + Send>>) {
-        self.base.set_attribute_setter(AttributeId::Value, setter);
+    pub fn set_value_setter(&mut self, value_setter: Arc<Mutex<dyn AttributeSetter + Send>>) {
+        self.value_setter = Some(value_setter);
     }
 
     /// Gets the minimum sampling interval, if the attribute was set
-    pub fn minimum_sampling_interval(&self) -> Option<i32> {
-        find_attribute_value_optional!(&self.base, MinimumSamplingInterval, Int32)
+    pub fn minimum_sampling_interval(&self) -> Option<f64> {
+        self.minimum_sampling_interval.clone()
     }
 
     /// Sets the minimum sampling interval
@@ -223,9 +408,8 @@ impl Variable {
     /// Specifies in milliseconds how fast the server can reasonably sample the value for changes
     ///
     /// The value 0 means server is to monitor the value continuously. The value -1 means indeterminate.
-    pub fn set_minimum_sampling_interval(&mut self, minimum_sampling_interval: i32) {
-        let now = DateTime::now();
-        let _ = self.base.set_attribute_value(AttributeId::MinimumSamplingInterval, Variant::Int32(minimum_sampling_interval), &now, &now);
+    pub fn set_minimum_sampling_interval(&mut self, minimum_sampling_interval: f64) {
+        self.minimum_sampling_interval = Some(minimum_sampling_interval);
     }
 
     pub fn is_readable(&self) -> bool {
@@ -246,13 +430,12 @@ impl Variable {
         self.set_access_level(access_level);
     }
 
-    pub fn set_access_level(&mut self, access_level: AccessLevel) {
-        let _ = self.base.set_attribute(AttributeId::AccessLevel, DataValue::new(access_level.bits));
+    pub fn access_level(&self) -> AccessLevel {
+        AccessLevel::from_bits_truncate(self.access_level)
     }
 
-    pub fn access_level(&self) -> AccessLevel {
-        let bits = find_attribute_value_mandatory!(&self.base, AccessLevel, Byte);
-        AccessLevel::from_bits_truncate(bits)
+    pub fn set_access_level(&mut self, access_level: AccessLevel) {
+        self.access_level = access_level.bits();
     }
 
     pub fn is_user_readable(&self) -> bool {
@@ -263,39 +446,43 @@ impl Variable {
         self.user_access_level().contains(UserAccessLevel::CURRENT_WRITE)
     }
 
-    pub fn set_user_access_level(&mut self, user_access_level: UserAccessLevel) {
-        let _ = self.base.set_attribute(AttributeId::UserAccessLevel, DataValue::new(user_access_level.bits));
+    pub fn user_access_level(&self) -> UserAccessLevel {
+        UserAccessLevel::from_bits_truncate(self.user_access_level)
     }
 
-    pub fn user_access_level(&self) -> UserAccessLevel {
-        let bits = find_attribute_value_mandatory!(&self.base, UserAccessLevel, Byte);
-        UserAccessLevel::from_bits_truncate(bits)
+    pub fn set_user_access_level(&mut self, user_access_level: UserAccessLevel) {
+        self.user_access_level = user_access_level.bits();
     }
 
     pub fn value_rank(&self) -> i32 {
-        find_attribute_value_mandatory!(&self.base, ValueRank, Int32)
+        self.value_rank
+    }
+
+    pub fn set_value_rank(&mut self, value_rank: i32) {
+        self.value_rank = value_rank;
     }
 
     pub fn historizing(&self) -> bool {
-        find_attribute_value_mandatory!(&self.base, Historizing, Boolean)
+        self.historizing
+    }
+
+    pub fn set_historizing(&mut self, historizing: bool) {
+        self.historizing = historizing;
     }
 
     pub fn array_dimensions(&self) -> Option<Vec<u32>> {
-        if let Some(values) = find_attribute_value_optional!(&self.base, ArrayDimensions, Array) {
-            // The expectation is that this Vec<Variant> is a non-zero Vec<u32>
-            if values.is_empty() {
-                panic!("Expecting array dimensions, got an empty array");
-            } else {
-                Some(values.iter().map(|v| {
-                    if let Variant::UInt32(ref v) = v {
-                        *v
-                    } else {
-                        panic!("Expecting array dimensions to be UInt32, but got a non UInt32");
-                    }
-                }).collect::<Vec<u32>>())
-            }
-        } else {
-            None
-        }
+        self.array_dimensions.clone()
+    }
+
+    pub fn set_array_dimensions(&mut self, array_dimensions: &[u32]) {
+        self.array_dimensions = Some(array_dimensions.to_vec());
+    }
+
+    pub fn data_type(&self) -> NodeId {
+        self.data_type.clone()
+    }
+
+    pub fn set_data_type<T>(&mut self, data_type: T) where T: Into<NodeId> {
+        self.data_type = data_type.into();
     }
 }

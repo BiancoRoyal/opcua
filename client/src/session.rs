@@ -4,18 +4,26 @@
 //! The session also has async functionality but that is reserved for publish requests on subscriptions
 //! and events.
 use std::{
+    cmp, thread,
+    convert::TryFrom,
     result::Result,
     collections::HashSet,
     str::FromStr,
-    sync::{Arc, Mutex, RwLock},
-    time::Duration,
-    thread,
+    sync::{Arc, Mutex, RwLock, mpsc},
+    time::{Instant, Duration},
 };
-use futures::sync::mpsc::UnboundedSender;
+use futures::{
+    future,
+    Future,
+    sync::mpsc::UnboundedSender,
+    stream::Stream,
+};
+use tokio;
+use tokio_timer::Interval;
 
 use opcua_core::{
     comms::secure_channel::{Role, SecureChannel},
-    crypto::{self, CertificateStore, PrivateKey, SecurityPolicy, X509},
+    crypto::{self, CertificateStore, PrivateKey, SecurityPolicy, X509, user_identity::make_user_name_identity_token},
 };
 
 use opcua_types::{
@@ -31,7 +39,7 @@ use crate::{
     comms::tcp_transport::TcpTransport,
     message_queue::MessageQueue,
     session_retry::{SessionRetryPolicy, Answer},
-    session_state::SessionState,
+    session_state::{SessionState, ConnectionState},
     subscription::{self, Subscription},
     subscription_state::SubscriptionState,
     subscription_timer::{SubscriptionTimer, SubscriptionTimerCommand},
@@ -69,6 +77,12 @@ impl Into<SessionInfo> for (EndpointDescription, client::IdentityToken) {
             client_certificate: None,
         }
     }
+}
+
+/// A `Session` runs in a loop, which can be terminated by sending it a `SessionCommand`.
+pub enum SessionCommand {
+    /// Stop running as soon as possible
+    Stop
 }
 
 /// A session of the client. The session is associated with an endpoint and maintains a state
@@ -123,6 +137,10 @@ impl Session {
     /// * `certificate_store` - certificate management on disk
     /// * `session_info` - information required to establish a new session.
     ///
+    /// # Returns
+    ///
+    /// * `Session` - the interface that shall be used to communicate between the client and the server.
+    ///
     pub(crate) fn new(application_description: ApplicationDescription, certificate_store: Arc<RwLock<CertificateStore>>, session_info: SessionInfo, session_retry_policy: SessionRetryPolicy) -> Session {
         // TODO take these from the client config
         let decoding_limits = DecodingLimits::default();
@@ -150,6 +168,12 @@ impl Session {
 
     /// Connects to the server, creates and activates a session. If there
     /// is a failure, it will be communicated by the status code in the result.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - connection has happened and the session is activated
+    /// * `Err(StatusCode)` - reason for failure
+    ///
     pub fn connect_and_activate(&mut self) -> Result<(), StatusCode> {
         // Connect now using the session state
         self.connect()?;
@@ -158,12 +182,24 @@ impl Session {
         Ok(())
     }
 
-    /// Sets the session retry policy
+    /// Sets the session retry policy that dictates what this session will do if the connection
+    /// fails or goes down. The retry policy enables the session to retry a connection on an
+    /// interval up to a maxmimum number of times.
+    ///
+    /// # Arguments
+    ///
+    /// * `session_retry_policy` - the session retry policy to use
+    ///
     pub fn set_session_retry_policy(&mut self, session_retry_policy: SessionRetryPolicy) {
         self.session_retry_policy = session_retry_policy;
     }
 
     /// Register a callback to be notified when the session has been closed.
+    ///
+    /// # Arguments
+    ///
+    /// * `session_closed_callback` - the session closed callback
+    ///
     pub fn set_session_closed_callback<CB>(&mut self, session_closed_callback: CB) where CB: OnSessionClosed + Send + Sync + 'static {
         let mut session_state = trace_write_lock_unwrap!(self.session_state);
         session_state.set_session_closed_callback(session_closed_callback);
@@ -171,12 +207,27 @@ impl Session {
 
     /// Registers a callback to be notified when the session connection status has changed.
     /// This will be called if connection status changes from connected to disconnected or vice versa.
-    pub fn set_connection_status_callback<CB>(&mut self, callback: CB) where CB: OnConnectionStatusChange + Send + Sync + 'static {
-        self.connection_status_callback = Some(Box::new(callback));
+    ///
+    /// # Arguments
+    ///
+    /// * `connection_status_callback` - the connection status callback.
+    ///
+    pub fn set_connection_status_callback<CB>(&mut self, connection_status_callback: CB) where CB: OnConnectionStatusChange + Send + Sync + 'static {
+        self.connection_status_callback = Some(Box::new(connection_status_callback));
     }
 
     /// Reconnects to the server and tries to activate the existing session. If there
-    /// is a failure, it will be communicated by the status code in the result.
+    /// is a failure, it will be communicated by the status code in the result. You should not
+    /// call this if there is a session retry policy associated with the session.
+    ///
+    /// Reconnecting will attempt to transfer or recreate subscriptions that were on the old
+    /// session before it terminated.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - reconnection has happened and the session is activated
+    /// * `Err(StatusCode)` - reason for failure
+    ///
     pub fn reconnect_and_activate(&mut self) -> Result<(), StatusCode> {
         // Do nothing if already connected / activated
         if self.is_connected() {
@@ -278,7 +329,7 @@ impl Session {
                         // For each monitored item
                         let items_to_create = subscription.monitored_items().iter().map(|(_, item)| {
                             MonitoredItemCreateRequest {
-                                item_to_monitor: item.item_to_monitor(),
+                                item_to_monitor: item.item_to_monitor().clone(),
                                 monitoring_mode: item.monitoring_mode(),
                                 requested_parameters: MonitoringParameters {
                                     client_handle: item.client_handle(),
@@ -290,11 +341,21 @@ impl Session {
                             }
                         }).collect::<Vec<MonitoredItemCreateRequest>>();
                         let _ = self.create_monitored_items(subscription_id, TimestampsToReturn::Both, &items_to_create);
+
+                        // Recreate any triggers for the monitored item. This code assumes monitored item
+                        // ids are the same value as they were in the previous subscription.
+                        subscription.monitored_items().iter().for_each(|(_, item)| {
+                            let triggered_items = item.triggered_items();
+                            if !triggered_items.is_empty() {
+                                let links_to_add = triggered_items.iter().map(|i| *i).collect::<Vec<u32>>();
+                                let _ = self.set_triggering(subscription_id, item.id(), links_to_add.as_slice(), &[]);
+                            }
+                        });
                     } else {
                         warn!("Could not create a subscription from the existing subscription {}", subscription_id);
                     }
                 } else {
-                    panic!("Subscription {}, doesn't exist although it should");
+                    panic!("Subscription {}, doesn't exist although it should", subscription_id);
                 }
             });
 
@@ -347,8 +408,15 @@ impl Session {
         }
     }
 
-    /// Connects to the server (if possible) using the configured session arguments. If there
-    /// is a failure, it will be communicated by the status code in the result.
+    /// Connects to the server using the configured session arguments. No attempt is made to retry
+    /// the connection if the attempt fails. If there is a failure, it will be communicated by the
+    /// status code in the result.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - connection has happened
+    /// * `Err(StatusCode)` - reason for failure
+    ///
     pub fn connect_no_retry(&mut self) -> Result<(), StatusCode> {
         let endpoint_url = self.session_info.endpoint.endpoint_url.clone();
         info!("Connect");
@@ -388,26 +456,80 @@ impl Session {
     }
 
     /// Test if the session is in a connected state
+    ///
+    /// # Returns
+    ///
+    /// * `true` - Session is connected
+    /// * `false` - Session is not connected
+    ///
     pub fn is_connected(&self) -> bool {
         self.transport.is_connected()
     }
 
-    /// Runs a polling loop for this session to perform periodic activity such as processing subscriptions,
-    /// as well as recovering from connection errors. The run command will break if the session is disconnected
+    /// Internal constant for the sleep interval used during polling
+    const POLL_SLEEP_INTERVAL: u64 = 50;
+
+    /// Synchronously runs a polling loop over the supplied session. The run command performs
+    /// periodic actions such as receiving messages, processing subscriptions, and recovering from
+    /// connection errors. The run command will break if the session is disconnected
     /// and cannot be reestablished.
+    ///
+    /// The `run()` function returns a `Sender` that can be used to send a message to the session
+    /// to cause it to terminate.
+    ///
+    /// # Arguments
+    ///
+    /// * `session` - the session to run ynchronously
     ///
     /// # Returns
     ///
-    /// * `Ok(bool)` - returns `true` if an action was performed, `false` if no action was performed
-    ///                but polling slept for a little bit.
-    /// * `Err(StatusCode)` - Request failed, status code is the reason for failure
+    /// * `mpsc::Sender<ClientCommand>` - A sender that allows the caller to send a message to the
+    ///                        run loop to cause it to stop.
     ///
-    pub fn run(session: Arc<RwLock<Session>>) {
-        const POLL_SLEEP_INTERVAL: u64 = 50;
+    pub fn run(session: Arc<RwLock<Session>>) -> mpsc::Sender<SessionCommand> {
+        let (tx, rx) = mpsc::channel();
+        Self::run_loop(session, Self::POLL_SLEEP_INTERVAL, rx);
+        tx
+    }
+
+    /// Asynchronously runs a polling loop over the supplied session. The run command performs
+    /// periodic actions such as receiving messages, processing subscriptions, and recovering from
+    /// connection errors. The run command will break if the session is disconnected
+    /// and cannot be reestablished.
+    ///
+    /// The session runs on a separate thread so the call will return immediately.
+    ///
+    /// The `run()` function returns a `Sender` that can be used to send a message to the session
+    /// to cause it to terminate.
+    ///
+    /// # Arguments
+    ///
+    /// * `session` - the session to run asynchronously
+    ///
+    /// # Returns
+    ///
+    /// * `mpsc::Sender<ClientCommand>` - A sender that allows the caller to send a message to the
+    ///                        run loop to cause it to stop.
+    ///
+    pub fn run_async(session: Arc<RwLock<Session>>) -> mpsc::Sender<SessionCommand> {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            Self::run_loop(session, Self::POLL_SLEEP_INTERVAL, rx)
+        });
+        tx
+    }
+
+    /// The main running loop for a session. This is used by `run()` and `run_async()` to run
+    /// continuously until a signal is received to terminate.
+    fn run_loop(session: Arc<RwLock<Session>>, sleep_interval: u64, rx: mpsc::Receiver<SessionCommand>) {
         loop {
             // Main thread has nothing to do - just wait for publish events to roll in
             let mut session = session.write().unwrap();
-            if let Err(_) = session.poll(POLL_SLEEP_INTERVAL) {
+            if rx.try_recv().is_ok() {
+                info!("Run session was terminated by a message");
+                break;
+            }
+            if session.poll(sleep_interval).is_err() {
                 // Break the loop if connection goes down
                 info!("Connection to server broke, so terminating");
                 break;
@@ -419,7 +541,16 @@ impl Session {
     /// async responses, attempts to reconnect if the client is disconnected from the client and
     /// sleeps a little bit if nothing needed to be done.
     ///
-    /// Returns `true` if it did something, `false` if it caused the thread to sleep for a bit.
+    /// # Arguments
+    ///
+    /// * `sleep_for` - the period of time in milliseconds that poll should sleep for if it performed
+    ///                 no action.
+    ///
+    /// # Returns
+    ///
+    /// * `true` - if an action was performed during the poll
+    /// * `false` - if no action was performed during the poll and the poll slept
+    ///
     pub fn poll(&mut self, sleep_for: u64) -> Result<bool, ()> {
         let did_something = if self.is_connected() {
             self.handle_publish_responses()
@@ -433,7 +564,7 @@ impl Session {
                 Answer::Retry => {
                     info!("Retrying to reconnect to server...");
                     self.session_retry_policy.set_last_attempt(Utc::now());
-                    if let Ok(_) = self.reconnect_and_activate() {
+                    if self.reconnect_and_activate().is_ok() {
                         info!("Retry to connect was successful");
                         self.session_retry_policy.reset_retry_count();
                     } else {
@@ -456,8 +587,124 @@ impl Session {
         Ok(did_something)
     }
 
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+    // Discovery Service set
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /// Sends a [`FindServersRequest`] to the server denoted by the discovery url.
+    ///
+    /// See OPC UA Part 4 - Services 5.4.2 for complete description of the service and error responses.
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint_url` - The network address that the Client used to access the Discovery Endpoint.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<ApplicationDescription>)` - A list of [`ApplicationDescription`] that meet criteria specified in the request.
+    /// * `Err(StatusCode)` - Request failed, status code is the reason for failure
+    ///
+    /// [`FindServersRequest`]: ./struct.FindServersRequest.html
+    /// [`ApplicationDescription`]: ./struct.ApplicationDescription.html
+    ///
+    pub fn find_servers<T>(&mut self, endpoint_url: T) -> Result<Vec<ApplicationDescription>, StatusCode> where T: Into<UAString> {
+        let request = FindServersRequest {
+            request_header: self.make_request_header(),
+            endpoint_url: endpoint_url.into(),
+            locale_ids: None,
+            server_uris: None,
+        };
+        let response = self.send_request(request)?;
+        if let SupportedMessage::FindServersResponse(response) = response {
+            crate::process_service_result(&response.response_header)?;
+            let servers = if let Some(servers) = response.servers {
+                servers
+            } else {
+                Vec::new()
+            };
+            Ok(servers)
+        } else {
+            Err(crate::process_unexpected_response(response))
+        }
+    }
+
+    /// Obtain the list of endpoints supported by the server by sending it a [`GetEndpointsRequest`].
+    ///
+    /// See OPC UA Part 4 - Services 5.4.4 for complete description of the service and error responses.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<EndpointDescription>)` - A list of endpoints supported by the server
+    /// * `Err(StatusCode)` - Request failed, status code is the reason for failure
+    ///
+    /// [`GetEndpointsRequest`]: ./struct.GetEndpointsRequest.html
+    ///
+    pub fn get_endpoints(&mut self) -> Result<Vec<EndpointDescription>, StatusCode> {
+        debug!("get_endpoints");
+        let endpoint_url = self.session_info.endpoint.endpoint_url.clone();
+        let request = GetEndpointsRequest {
+            request_header: self.make_request_header(),
+            endpoint_url,
+            locale_ids: None,
+            profile_uris: None,
+        };
+
+        let response = self.send_request(request)?;
+        if let SupportedMessage::GetEndpointsResponse(response) = response {
+            crate::process_service_result(&response.response_header)?;
+            if response.endpoints.is_none() {
+                debug!("get_endpoints, success but no endpoints");
+                Ok(Vec::new())
+            } else {
+                debug!("get_endpoints, success");
+                Ok(response.endpoints.unwrap())
+            }
+        } else {
+            error!("get_endpoints failed {:?}", response);
+            Err(crate::process_unexpected_response(response))
+        }
+    }
+
+    /// This function is used by servers that wish to register themselves with a discovery server.
+    /// i.e. one server is the client to another server. The server sends a [`RegisterServerRequest`]
+    /// to the discovery server to register itself. Servers are expected to re-register themselves periodically
+    /// with the discovery server, with a maximum of 10 minute intervals.
+    ///
+    /// See OPC UA Part 4 - Services 5.4.5 for complete description of the service and error responses.
+    ///
+    /// # Arguments
+    ///
+    /// * `server` - The server to register
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Success
+    /// * `Err(StatusCode)` - Request failed, status code is the reason for failure
+    ///
+    /// [`RegisterServerRequest`]: ./struct.RegisterServerRequest.html
+    ///
+    pub fn register_server(&mut self, server: RegisteredServer) -> Result<(), StatusCode> {
+        let request = RegisterServerRequest {
+            request_header: self.make_request_header(),
+            server,
+        };
+        let response = self.send_request(request)?;
+        if let SupportedMessage::RegisterServerResponse(response) = response {
+            crate::process_service_result(&response.response_header)?;
+            Ok(())
+        } else {
+            Err(crate::process_unexpected_response(response))
+        }
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+    // SecureChannel Service set
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+
     /// Sends an [`OpenSecureChannelRequest`] to the server
     ///
+    ///
+    /// See OPC UA Part 4 - Services 5.5.2 for complete description of the service and error responses.
     /// # Returns
     ///
     /// * `Ok(())` - Success
@@ -473,6 +720,8 @@ impl Session {
 
     /// Sends a [`CloseSecureChannelRequest`] to the server which will cause the server to drop
     /// the connection.
+    ///
+    /// See OPC UA Part 4 - Services 5.5.3 for complete description of the service and error responses.
     ///
     /// # Returns
     ///
@@ -490,9 +739,15 @@ impl Session {
         Ok(())
     }
 
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+    // Session Service set
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+
     /// Sends a [`CreateSessionRequest`] to the server, returning the session id of the created
     /// session. Internally, the session will store the authentication token which is used for requests
     /// subsequent to this call.
+    ///
+    /// See OPC UA Part 4 - Services 5.6.2 for complete description of the service and error responses.
     ///
     /// # Returns
     ///
@@ -503,7 +758,7 @@ impl Session {
     ///
     pub fn create_session(&mut self) -> Result<NodeId, StatusCode> {
         // Get some state stuff
-        let endpoint_url = UAString::from(self.session_info.endpoint.endpoint_url.clone());
+        let endpoint_url = self.session_info.endpoint.endpoint_url.clone();
 
         let client_nonce = {
             let secure_channel = trace_read_lock_unwrap!(self.secure_channel);
@@ -520,6 +775,9 @@ impl Session {
             ByteString::null()
         };
 
+        // Requested session timeout should be larger than your expected subscription rate.
+        let requested_session_timeout = self.session_retry_policy.session_timeout();
+
         let request = CreateSessionRequest {
             request_header: self.make_request_header(),
             client_description: self.application_description.clone(),
@@ -528,7 +786,7 @@ impl Session {
             session_name,
             client_nonce,
             client_certificate,
-            requested_session_timeout: 0f64,
+            requested_session_timeout,
             max_response_message_size: 0,
         };
 
@@ -538,17 +796,19 @@ impl Session {
         if let SupportedMessage::CreateSessionResponse(response) = response {
             crate::process_service_result(&response.response_header)?;
 
-            let session_state = self.session_state.clone();
-            let mut session_state = trace_write_lock_unwrap!(session_state);
+            let session_id = {
+                let mut session_state = trace_write_lock_unwrap!(self.session_state);
+                session_state.set_session_id(response.session_id.clone());
+                session_state.set_authentication_token(response.authentication_token.clone());
+                {
+                    let mut secure_channel = trace_write_lock_unwrap!(self.secure_channel);
+                    let _ = secure_channel.set_remote_nonce_from_byte_string(&response.server_nonce);
+                    let _ = secure_channel.set_remote_cert_from_byte_string(&response.server_certificate);
+                }
+                session_state.session_id()
+            };
 
-            session_state.set_session_id(response.session_id.clone());
-            session_state.set_authentication_token(response.authentication_token.clone());
-            {
-                let mut secure_channel = trace_write_lock_unwrap!(self.secure_channel);
-                let _ = secure_channel.set_remote_nonce_from_byte_string(&response.server_nonce);
-                let _ = secure_channel.set_remote_cert_from_byte_string(&response.server_certificate);
-            }
-            debug!("server nonce is {:?}", response.server_nonce);
+            // debug!("Server nonce is {:?}", response.server_nonce);
 
             // The server certificate is validated if the policy requires it
             let security_policy = self.security_policy();
@@ -577,21 +837,107 @@ impl Session {
                 error!("Server's certificate was rejected");
                 Err(cert_status_code)
             } else {
+                // Spawn a task to ping the server to keep the connection alive before the session
+                // timeout period.
+                debug!("Revised session timeout is {}", response.revised_session_timeout);
+                self.spawn_session_activity_task(response.revised_session_timeout);
+
                 // TODO Verify signature using server's public key (from endpoint) comparing with data made from client certificate and nonce.
                 // crypto::verify_signature_data(verification_key, security_policy, server_certificate, client_certificate, client_nonce);
-                Ok(session_state.session_id())
+                Ok(session_id)
             }
         } else {
             Err(crate::process_unexpected_response(response))
         }
     }
 
-    fn security_policy(&self) -> SecurityPolicy {
-        let secure_channel = trace_read_lock_unwrap!(self.secure_channel);
-        secure_channel.security_policy()
+    /// Start a task that will periodically "ping" the server to keep the session alive. The ping rate
+    /// will be 3/4 the session timeout rate.
+    ///
+    /// NOTE: This code assumes that the session_timeout period never changes, e.g. if you
+    /// connected to a server, negotiate a timeout period and then for whatever reason need to
+    /// reconnect to that same server, you will receive the same timeout. If you get a different
+    /// timeout then this code will not care and will continue to ping at the original rate.
+    fn spawn_session_activity_task(&mut self, session_timeout: f64) {
+        debug!("spawn_session_activity_task({})", session_timeout);
+
+        let connection_state = {
+            let session_state = trace_read_lock_unwrap!(self.session_state);
+            session_state.connection_state()
+        };
+
+        let session_state = self.session_state.clone();
+        let connection_state_take_while = connection_state.clone();
+        let connection_state_for_each = connection_state.clone();
+
+        // Session activity will happen every 3/4 of the timeout period
+        const MIN_SESSION_ACTIVITY_MS: u64 = 1000;
+        let session_activity = cmp::max((session_timeout as u64 * 3) / 4, MIN_SESSION_ACTIVITY_MS);
+        debug!("session timeout is {}, activity timer is {}", session_timeout, session_activity);
+
+        let last_timeout = Arc::new(Mutex::new(Instant::now()));
+
+        // The timer runs at a higher frequency take_while() to terminate as soon after the session
+        // state has terminated. Each time it runs it will test if the interval has elapsed or not.
+
+        let session_activity_interval = Duration::from_millis(session_activity);
+        let task = Interval::new(Instant::now(), Duration::from_millis(MIN_SESSION_ACTIVITY_MS))
+            .take_while(move |_| {
+                let connection_state = trace_read_lock_unwrap!(connection_state_take_while);
+                let terminated = match *connection_state {
+                    ConnectionState::Finished(_) => true,
+                    _ => false
+                };
+                future::ok(!terminated)
+            })
+            .for_each(move |_| {
+                // Get the time now
+                let now = Instant::now();
+                let mut last_timeout = last_timeout.lock().unwrap();
+
+                // Calculate to interval since last check
+                let interval = now - *last_timeout;
+                if interval > session_activity_interval {
+                    let connection_state = {
+                        let connection_state = trace_read_lock_unwrap!(connection_state_for_each);
+                        *connection_state
+                    };
+                    match connection_state {
+                        ConnectionState::Processing => {
+                            info!("Session activity keep-alive request");
+                            let mut session_state = trace_write_lock_unwrap!(session_state);
+                            let request_header = session_state.make_request_header();
+                            let request = ReadRequest {
+                                request_header,
+                                max_age: 1f64,
+                                timestamps_to_return: TimestampsToReturn::Server,
+                                nodes_to_read: Some(vec![]),
+                            };
+                            let _ = session_state.async_send_request(request, true);
+                        }
+                        connection_state => {
+                            info!("Session activity keep-alive is doing nothing - connection state = {:?}", connection_state);
+                        }
+                    };
+                    *last_timeout = now;
+                }
+                Ok(())
+            })
+            .map(|_| {
+                info!("Session activity timer task is finished");
+            })
+            .map_err(|err| {
+                error!("Session activity timer task error = {:?}", err);
+            });
+
+        let _ = thread::spawn(move || {
+            tokio::run(task);
+        });
     }
 
     /// Sends an [`ActivateSessionRequest`] to the server to activate this session
+    ///
+    /// See OPC UA Part 4 - Services 5.6.3 for complete description of the service and error responses.
     ///
     /// # Returns
     ///
@@ -658,7 +1004,9 @@ impl Session {
         }
     }
 
-    /// Sends a [`CancelRequest`] to the server to cancel an outstanding service request.
+    /// Cancels an outstanding service request by sending a [`CancelRequest`] to the server.
+    ///
+    /// See OPC UA Part 4 - Services 5.6.5 for complete description of the service and error responses.
     ///
     /// # Arguments
     ///
@@ -685,103 +1033,169 @@ impl Session {
         }
     }
 
-    /// Sends a [`FindServersRequest`] to the server denoted by the discovery url
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+    // NodeManagement Service set
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /// Add nodes by sending a [`AddNodesRequest`] to the server.
+    ///
+    /// See OPC UA Part 4 - Services 5.7.2 for complete description of the service and error responses.
     ///
     /// # Arguments
     ///
-    /// * `endpoint_url` - The network address that the Client used to access the Discovery Endpoint.
+    /// * `nodes_to_add` - A list of [`AddNodesItem`] to be added to the server.
     ///
     /// # Returns
     ///
-    /// * `Ok(Vec<ApplicationDescription>)` - Success, list of Servers that meet criteria specified in the request.
-    /// * `Err(StatusCode)` - Request failed, status code is the reason for failure
+    /// * `Ok(Vec<AddNodesResult>)` - A list of [`AddNodesResult`] corresponding to each add node operation.
+    /// * `Err(StatusCode)` - Status code reason for failure.
     ///
-    /// [`FindServersRequest`]: ./struct.FindServersRequest.html
+    /// [`AddNodesRequest`]: ./struct.AddNodesRequest.html
+    /// [`AddNodesItem`]: ./struct.AddNodesItem.html
+    /// [`AddNodesResult`]: ./struct.AddNodesResult.html
     ///
-    pub fn find_servers<T>(&mut self, endpoint_url: T) -> Result<Vec<ApplicationDescription>, StatusCode> where T: Into<UAString> {
-        let request = FindServersRequest {
-            request_header: self.make_request_header(),
-            endpoint_url: endpoint_url.into(),
-            locale_ids: None,
-            server_uris: None,
-        };
-        let response = self.send_request(request)?;
-        if let SupportedMessage::FindServersResponse(response) = response {
-            crate::process_service_result(&response.response_header)?;
-            let servers = if let Some(servers) = response.servers {
-                servers
-            } else {
-                Vec::new()
+    pub fn add_nodes(&mut self, nodes_to_add: &[AddNodesItem]) -> Result<Vec<AddNodesResult>, StatusCode> {
+        if nodes_to_add.is_empty() {
+            error!("add_nodes, called with no nodes to add");
+            Err(StatusCode::BadNothingToDo)
+        } else {
+            let request = AddNodesRequest {
+                request_header: self.make_request_header(),
+                nodes_to_add: Some(nodes_to_add.to_vec()),
             };
-            Ok(servers)
-        } else {
-            Err(crate::process_unexpected_response(response))
+            let response = self.send_request(request)?;
+            if let SupportedMessage::AddNodesResponse(response) = response {
+                Ok(response.results.unwrap())
+            } else {
+                Err(crate::process_unexpected_response(response))
+            }
         }
     }
 
-    /// Sends a [`RegisterServerRequest`] to the discovery server to register a server. Although
-    /// this function appears in the client API, it is for the benefit of servers that wish to
-    /// register with a discovery server. Servers are expected to re-register themselves periodically
-    /// with the discovery server, with a maximum of 10 minute intervals.
+    /// Add references by sending a [`AddReferencesRequest`] to the server.
+    ///
+    /// See OPC UA Part 4 - Services 5.7.3 for complete description of the service and error responses.
     ///
     /// # Arguments
     ///
-    /// * `server` - The server to register
+    /// * `references_to_add` - A list of [`AddReferencesItem`] to be sent to the server.
     ///
     /// # Returns
     ///
-    /// * `Ok(())` - Success
+    /// * `Ok(Vec<StatusCode>)` - A list of `StatusCode` corresponding to each add reference operation.
+    /// * `Err(StatusCode)` - Status code reason for failure.
+    ///
+    /// [`AddReferencesRequest`]: ./struct.AddReferencesRequest.html
+    /// [`AddReferencesItem`]: ./struct.AddReferencesItem.html
+    ///
+    pub fn add_references(&mut self, references_to_add: &[AddReferencesItem]) -> Result<Vec<StatusCode>, StatusCode> {
+        if references_to_add.is_empty() {
+            error!("add_references, called with no references to add");
+            Err(StatusCode::BadNothingToDo)
+        } else {
+            let request = AddReferencesRequest {
+                request_header: self.make_request_header(),
+                references_to_add: Some(references_to_add.to_vec()),
+            };
+            let response = self.send_request(request)?;
+            if let SupportedMessage::AddReferencesResponse(response) = response {
+                Ok(response.results.unwrap())
+            } else {
+                Err(crate::process_unexpected_response(response))
+            }
+        }
+    }
+
+    /// Delete nodes by sending a [`DeleteNodesRequest`] to the server.
+    ///
+    /// See OPC UA Part 4 - Services 5.7.4 for complete description of the service and error responses.
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes_to_delete` - A list of [`DeleteNodesItem`] to be sent to the server.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<StatusCode>)` - A list of `StatusCode` corresponding to each delete node operation.
+    /// * `Err(StatusCode)` - Status code reason for failure.
+    ///
+    /// [`DeleteNodesRequest`]: ./struct.DeleteNodesRequest.html
+    /// [`DeleteNodesItem`]: ./struct.DeleteNodesItem.html
+    ///
+    pub fn delete_nodes(&mut self, nodes_to_delete: &[DeleteNodesItem]) -> Result<Vec<StatusCode>, StatusCode> {
+        if nodes_to_delete.is_empty() {
+            error!("delete_nodes, called with no nodes to delete");
+            Err(StatusCode::BadNothingToDo)
+        } else {
+            let request = DeleteNodesRequest {
+                request_header: self.make_request_header(),
+                nodes_to_delete: Some(nodes_to_delete.to_vec()),
+            };
+            let response = self.send_request(request)?;
+            if let SupportedMessage::DeleteNodesResponse(response) = response {
+                Ok(response.results.unwrap())
+            } else {
+                Err(crate::process_unexpected_response(response))
+            }
+        }
+    }
+
+    /// Delete references by sending a [`DeleteReferencesRequest`] to the server.
+    ///
+    /// See OPC UA Part 4 - Services 5.7.5 for complete description of the service and error responses.
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes_to_delete` - A list of [`DeleteReferencesItem`] to be sent to the server.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<StatusCode>)` - A list of `StatusCode` corresponding to each delete node operation.
+    /// * `Err(StatusCode)` - Status code reason for failure.
+    ///
+    /// [`DeleteReferencesRequest`]: ./struct.DeleteReferencesRequest.html
+    /// [`DeleteReferencesItem`]: ./struct.DeleteReferencesItem.html
+    ///
+    pub fn delete_references(&mut self, references_to_delete: &[DeleteReferencesItem]) -> Result<Vec<StatusCode>, StatusCode> {
+        if references_to_delete.is_empty() {
+            error!("delete_references, called with no references to delete");
+            Err(StatusCode::BadNothingToDo)
+        } else {
+            let request = DeleteReferencesRequest {
+                request_header: self.make_request_header(),
+                references_to_delete: Some(references_to_delete.to_vec()),
+            };
+            let response = self.send_request(request)?;
+            if let SupportedMessage::DeleteReferencesResponse(response) = response {
+                Ok(response.results.unwrap())
+            } else {
+                Err(crate::process_unexpected_response(response))
+            }
+        }
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+    // View Service set
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /// Discover the references to the specified nodes by sending a [`BrowseRequest`] to the server.
+    ///
+    /// See OPC UA Part 4 - Services 5.8.2 for complete description of the service and error responses.
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes_to_browse` - A list of [`BrowseDescription`] describing nodes to browse.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Option<Vec<BrowseResult>)` - A list [`BrowseResult`] corresponding to each node to browse. A browse result
+    ///                                    may contain a continuation point, for use with `browse_next()`.
     /// * `Err(StatusCode)` - Request failed, status code is the reason for failure
     ///
-    /// [`RegisterServerRequest`]: ./struct.FindServersRequest.html
+    /// [`BrowseRequest`]: ./struct.BrowseRequest.html
+    /// [`BrowseDescription`]: ./struct.BrowseDescription.html
+    /// [`BrowseResult`]: ./struct.BrowseResult.html
     ///
-    pub fn register_server(&mut self, server: RegisteredServer) -> Result<(), StatusCode> {
-        let request = RegisterServerRequest {
-            request_header: self.make_request_header(),
-            server,
-        };
-        let response = self.send_request(request)?;
-        if let SupportedMessage::RegisterServerResponse(response) = response {
-            crate::process_service_result(&response.response_header)?;
-            Ok(())
-        } else {
-            Err(crate::process_unexpected_response(response))
-        }
-    }
-
-    /// Returns the subscription state object
-    pub fn subscription_state(&self) -> Arc<RwLock<SubscriptionState>> {
-        self.subscription_state.clone()
-    }
-
-    /// Sends a GetEndpoints request to the server
-    pub fn get_endpoints(&mut self) -> Result<Vec<EndpointDescription>, StatusCode> {
-        debug!("get_endpoints");
-        let endpoint_url = self.session_info.endpoint.endpoint_url.clone();
-        let request = GetEndpointsRequest {
-            request_header: self.make_request_header(),
-            endpoint_url,
-            locale_ids: None,
-            profile_uris: None,
-        };
-
-        let response = self.send_request(request)?;
-        if let SupportedMessage::GetEndpointsResponse(response) = response {
-            crate::process_service_result(&response.response_header)?;
-            if response.endpoints.is_none() {
-                debug!("get_endpoints, success but no endpoints");
-                Ok(Vec::new())
-            } else {
-                debug!("get_endpoints, success");
-                Ok(response.endpoints.unwrap())
-            }
-        } else {
-            error!("get_endpoints failed {:?}", response);
-            Err(crate::process_unexpected_response(response))
-        }
-    }
-
-    /// Sends a BrowseRequest to the server
     pub fn browse(&mut self, nodes_to_browse: &[BrowseDescription]) -> Result<Option<Vec<BrowseResult>>, StatusCode> {
         if nodes_to_browse.is_empty() {
             error!("browse, was not supplied with any nodes to browse");
@@ -809,7 +1223,26 @@ impl Session {
         }
     }
 
-    /// Sends a BrowseNextRequest to the server
+    /// Continue to discover references to nodes by sending continuation points in a [`BrowseNextRequest`]
+    /// to the server. This function may have to be called repeatedly to process the initial query.
+    ///
+    /// See OPC UA Part 4 - Services 5.8.3 for complete description of the service and error responses.
+    ///
+    /// # Arguments
+    ///
+    /// * `release_continuation_points` - Flag indicating if the continuation points should be released by the server
+    /// * `continuation_points` - A list of [`BrowseDescription`] continuation points
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Option<Vec<BrowseResult>)` - A list [`BrowseResult`] corresponding to each node to browse. A browse result
+    ///                                    may contain a continuation point, for use with `browse_next()`.
+    /// * `Err(StatusCode)` - Request failed, status code is the reason for failure
+    ///
+    /// [`BrowseRequest`]: ./struct.BrowseRequest.html
+    /// [`BrowseNextRequest`]: ./struct.BrowseNextRequest.html
+    /// [`BrowseResult`]: ./struct.BrowseResult.html
+    ///
     pub fn browse_next(&mut self, release_continuation_points: bool, continuation_points: &[ByteString]) -> Result<Option<Vec<BrowseResult>>, StatusCode> {
         if continuation_points.is_empty() {
             error!("browse_next, was not supplied with any continuation points");
@@ -832,8 +1265,106 @@ impl Session {
         }
     }
 
-    /// Sends a ReadRequest to the server
-    pub fn read_nodes(&mut self, nodes_to_read: &[ReadValueId]) -> Result<Option<Vec<DataValue>>, StatusCode> {
+    /// Register nodes on the server by sending a [`RegisterNodesRequest`]. The purpose of this
+    /// call is server-dependent but allows a client to ask a server to create nodes which are
+    /// otherwise expensive to set up or maintain, e.g. nodes attached to hardware.
+    ///
+    /// See OPC UA Part 4 - Services 5.8.5 for complete description of the service and error responses.
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes_to_register` - A list of [`NodeId`] nodes for the server to register
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<NodeId>)` - A list of [`NodeId`] corresponding to size and order of the input. The
+    ///                       server may return an alias for the input `NodeId`
+    /// * `Err(StatusCode)` - Request failed, status code is the reason for failure
+    ///
+    /// [`RegisterNodesRequest`]: ./struct.RegisterNodesRequest.html
+    /// [`NodeId`]: ./struct.NodeId.html
+    pub fn register_nodes(&mut self, nodes_to_register: &[NodeId]) -> Result<Vec<NodeId>, StatusCode> {
+        if nodes_to_register.is_empty() {
+            error!("register_nodes, was not supplied with any nodes to register");
+            Err(StatusCode::BadNothingToDo)
+        } else {
+            let request = RegisterNodesRequest {
+                request_header: self.make_request_header(),
+                nodes_to_register: Some(nodes_to_register.to_vec()),
+            };
+            let response = self.send_request(request)?;
+            if let SupportedMessage::RegisterNodesResponse(response) = response {
+                debug!("register_nodes, success");
+                crate::process_service_result(&response.response_header)?;
+                Ok(response.registered_node_ids.unwrap())
+            } else {
+                error!("register_nodes failed {:?}", response);
+                Err(crate::process_unexpected_response(response))
+            }
+        }
+    }
+
+    /// Unregister nodes on the server by sending a [`UnregisterNodesRequest`]. This indicates to
+    /// the server that the client relinquishes any need for these nodes. The server will ignore
+    /// unregistered nodes.
+    ///
+    /// See OPC UA Part 4 - Services 5.8.5 for complete description of the service and error responses.
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes_to_unregister` - A list of [`NodeId`] nodes for the server to unregister
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Request succeeded, server ignores invalid nodes
+    /// * `Err(StatusCode)` - Request failed, status code is the reason for failure
+    ///
+    /// [`UnregisterNodesRequest`]: ./struct.UnregisterNodesRequest.html
+    /// [`NodeId`]: ./struct.NodeId.html
+    ///
+    pub fn unregister_nodes(&mut self, nodes_to_unregister: &[NodeId]) -> Result<(), StatusCode> {
+        if nodes_to_unregister.is_empty() {
+            error!("unregister_nodes, was not supplied with any nodes to unregister");
+            Err(StatusCode::BadNothingToDo)
+        } else {
+            let request = UnregisterNodesRequest {
+                request_header: self.make_request_header(),
+                nodes_to_unregister: Some(nodes_to_unregister.to_vec()),
+            };
+            let response = self.send_request(request)?;
+            if let SupportedMessage::UnregisterNodesResponse(response) = response {
+                debug!("unregister_nodes, success");
+                crate::process_service_result(&response.response_header)?;
+                Ok(())
+            } else {
+                error!("unregister_nodes failed {:?}", response);
+                Err(crate::process_unexpected_response(response))
+            }
+        }
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+    // Attribute Service set
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /// Reads the value of nodes by sending a [`ReadRequest`] to the server.
+    ///
+    /// See OPC UA Part 4 - Services 5.10.2 for complete description of the service and error responses.
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes_to_read` - A list of [`ReadValueId`] to be read by the server.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<DataValue>)` - A list of [`DataValue`] corresponding to each read operation.
+    /// * `Err(StatusCode)` - Status code reason for failure.
+    ///
+    /// [`ReadRequest`]: ./struct.ReadRequest.html
+    /// [`ReadValueId`]: ./struct.ReadValueId.html
+    /// [`DataValue`]: ./struct.DataValue.html
+    ///
+    pub fn read(&mut self, nodes_to_read: &[ReadValueId]) -> Result<Option<Vec<DataValue>>, StatusCode> {
         if nodes_to_read.is_empty() {
             // No subscriptions
             error!("read_nodes, was not supplied with any nodes to read");
@@ -858,8 +1389,23 @@ impl Session {
         }
     }
 
-    /// Sends a WriteRequest to the server
-    pub fn write_value(&mut self, nodes_to_write: &[WriteValue]) -> Result<Option<Vec<StatusCode>>, StatusCode> {
+    /// Writes values to nodes by sending a [`WriteRequest`] to the server.
+    ///
+    /// See OPC UA Part 4 - Services 5.10.4 for complete description of the service and error responses.
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes_to_write` - A list of [`WriteValue`] to be sent to the server.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<StatusCode>)` - A list of `StatusCode` results corresponding to each write operation.
+    /// * `Err(StatusCode)` - Status code reason for failure.
+    ///
+    /// [`WriteRequest`]: ./struct.WriteRequest.html
+    /// [`WriteValue`]: ./struct.WriteValue.html
+    ///
+    pub fn write(&mut self, nodes_to_write: &[WriteValue]) -> Result<Option<Vec<StatusCode>>, StatusCode> {
         if nodes_to_write.is_empty() {
             // No subscriptions
             error!("write_value() was not supplied with any nodes to write");
@@ -881,343 +1427,110 @@ impl Session {
         }
     }
 
-    /// Create a subscription by sending a [`CreateSubscriptionRequest`] to the server.
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+    // Method Service set
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /// Calls a single method on an object on the server by sending a [`CallRequest`] to the server.
+    ///
+    /// See OPC UA Part 4 - Services 5.11.2 for complete description of the service and error responses.
     ///
     /// # Arguments
     ///
-    /// * `publishing_interval` - The requested publishing interval defines the cyclic rate that
-    ///   the Subscription is being requested to return Notifications to the Client. This interval
-    ///   is expressed in milliseconds. This interval is represented by the publishing timer in the
-    ///   Subscription state table. The negotiated value for this parameter returned in the
-    ///   response is used as the default sampling interval for MonitoredItems assigned to this
-    ///   Subscription. If the requested value is 0 or negative, the server shall revise with the
-    ///   fastest supported publishing interval in milliseconds.
-    /// * `lifetime_count` - Requested lifetime count. The lifetime count shall be a minimum of
-    ///   three times the keep keep-alive count. When the publishing timer has expired this
-    ///   number of times without a Publish request being available to send a NotificationMessage,
-    ///   then the Subscription shall be deleted by the Server.
-    /// * `max_keep_alive_count` - Requested maximum keep-alive count. When the publishing timer has
-    ///   expired this number of times without requiring any NotificationMessage to be sent, the
-    ///   Subscription sends a keep-alive Message to the Client. The negotiated value for this
-    ///   parameter is returned in the response. If the requested value is 0, the server shall
-    ///   revise with the smallest supported keep-alive count.
-    /// * `max_notifications_per_publish` - The maximum number of notifications that the Client
-    ///   wishes to receive in a single Publish response. A value of zero indicates that there is
-    ///   no limit. The number of notifications per Publish is the sum of monitoredItems in
-    ///   the DataChangeNotification and events in the EventNotificationList.
-    /// * `priority` - Indicates the relative priority of the Subscription. When more than one
-    ///   Subscription needs to send Notifications, the Server should de-queue a Publish request
-    ///   to the Subscription with the highest priority number. For Subscriptions with equal
-    ///   priority the Server should de-queue Publish requests in a round-robin fashion.
-    ///   A Client that does not require special priority settings should set this value to zero.
-    /// * `publishing_enabled` - A boolean parameter with the following values - `true` publishing
-    ///   is enabled for the Subscription, `false`, publishing is disabled for the Subscription.
-    ///   The value of this parameter does not affect the value of the monitoring mode Attribute of
-    ///   MonitoredItems.
+    /// * `method` - The method to call. Note this function takes anything that can be turned into
+    ///   a [`CallMethodRequest`] which includes a (`NodeId`, `NodeId`, `Option<Vec<Variant>>`)
+    ///   which refers to the object id, method id, and input arguments respectively.
+    /// * `items_to_delete` - List of Server-assigned ids for the MonitoredItems to be deleted.
     ///
     /// # Returns
     ///
-    /// * `Ok(u32)` - identifier for new subscription
-    /// * `Err(StatusCode)` - Status code reason for failure
+    /// * `Ok(CallMethodResult)` - A `[CallMethodResult]` for the Method call.
+    /// * `Err(StatusCode)` - Status code reason for failure.
     ///
-    /// [`CreateSubscriptionRequest`]: ./struct.CreateSubscriptionRequest.html
+    /// [`CallRequest`]: ./struct.CallRequest.html
+    /// [`CallMethodRequest`]: ./struct.CallMethodRequest.html
+    /// [`CallMethodResult`]: ./struct.CallMethodResult.html
     ///
-    pub fn create_subscription<CB>(&mut self, publishing_interval: f64, lifetime_count: u32, max_keep_alive_count: u32, max_notifications_per_publish: u32, priority: u8, publishing_enabled: bool, callback: CB)
-                                   -> Result<u32, StatusCode>
-        where CB: OnDataChange + Send + Sync + 'static {
-        self.create_subscription_inner(publishing_interval, lifetime_count, max_keep_alive_count, max_notifications_per_publish, priority, publishing_enabled, Arc::new(Mutex::new(callback)))
-    }
-
-    /// This is the internal handler for create subscription that receives the callback wrapped up and reference counted.
-    fn create_subscription_inner(&mut self, publishing_interval: f64, lifetime_count: u32, max_keep_alive_count: u32, max_notifications_per_publish: u32, priority: u8, publishing_enabled: bool,
-                                 callback: Arc<Mutex<dyn OnDataChange + Send + Sync + 'static>>)
-                                 -> Result<u32, StatusCode>
-    {
-        let request = CreateSubscriptionRequest {
+    pub fn call<T>(&mut self, method: T) -> Result<CallMethodResult, StatusCode> where T: Into<CallMethodRequest> {
+        debug!("call_method");
+        let methods_to_call = Some(vec![method.into()]);
+        let request = CallRequest {
             request_header: self.make_request_header(),
-            requested_publishing_interval: publishing_interval,
-            requested_lifetime_count: lifetime_count,
-            requested_max_keep_alive_count: max_keep_alive_count,
-            max_notifications_per_publish,
-            publishing_enabled,
-            priority,
+            methods_to_call,
         };
         let response = self.send_request(request)?;
-        if let SupportedMessage::CreateSubscriptionResponse(response) = response {
-            crate::process_service_result(&response.response_header)?;
-            let subscription = Subscription::new(response.subscription_id, response.revised_publishing_interval,
-                                                 response.revised_lifetime_count,
-                                                 response.revised_max_keep_alive_count,
-                                                 max_notifications_per_publish,
-                                                 publishing_enabled,
-                                                 priority,
-                                                 callback);
-
-            {
-                let subscription_id = {
-                    let mut subscription_state = trace_write_lock_unwrap!(self.subscription_state);
-                    let subscription_id = subscription.subscription_id();
-                    subscription_state.add_subscription(subscription);
-                    subscription_id
-                };
-                let _ = self.timer_command_queue.unbounded_send(SubscriptionTimerCommand::CreateTimer(subscription_id));
+        if let SupportedMessage::CallResponse(response) = response {
+            if let Some(mut results) = response.results {
+                if results.len() != 1 {
+                    error!("call_method, expecting a result from the call to the server, got {} results", results.len());
+                    Err(StatusCode::BadUnexpectedError)
+                } else {
+                    Ok(results.remove(0))
+                }
+            } else {
+                error!("call_method, expecting a result from the call to the server, got nothing");
+                Err(StatusCode::BadUnexpectedError)
             }
-            debug!("create_subscription, created a subscription with id {}", response.subscription_id);
-            Ok(response.subscription_id)
         } else {
-            error!("create_subscription failed {:?}", response);
             Err(crate::process_unexpected_response(response))
         }
     }
 
-    /// Modifies a subscription by sending a [`ModifySubscriptionRequest`] to the server.
+    /// Calls GetMonitoredItems via call_method(), putting a sane interface on the input / output.
     ///
     /// # Arguments
     ///
-    /// * `subscription_id` - subscription identifier returned from `create_subscription`.
-    ///
-    /// See `create_subscription` for description of other parameters
+    /// * `subscription_id` - Server allocated identifier for the subscription to return monitored items for.
     ///
     /// # Returns
     ///
-    /// * `Ok(())` - Success
-    /// * `Err(StatusCode)` - Request failed, status code is the reason for failure
+    /// * `Ok((Vec<u32>, Vec<u32>))` - Result for call, consisting a list of (monitored_item_id, client_handle)
+    /// * `Err(StatusCode)` - Status code reason for failure.
     ///
-    /// [`ModifySubscriptionRequest`]: ./struct.ModifySubscriptionRequest.html
-    ///
-    pub fn modify_subscription(&mut self, subscription_id: u32, publishing_interval: f64, lifetime_count: u32, max_keep_alive_count: u32, max_notifications_per_publish: u32, priority: u8) -> Result<(), StatusCode> {
-        if subscription_id == 0 {
-            error!("modify_subscription, subscription id must be non-zero, or the subscription is considered invalid");
-            Err(StatusCode::BadInvalidArgument)
-        } else if !self.subscription_exists(subscription_id) {
-            error!("modify_subscription, subscription id does not exist");
-            Err(StatusCode::BadInvalidArgument)
-        } else {
-            let request = ModifySubscriptionRequest {
-                request_header: self.make_request_header(),
-                subscription_id,
-                requested_publishing_interval: publishing_interval,
-                requested_lifetime_count: lifetime_count,
-                requested_max_keep_alive_count: max_keep_alive_count,
-                max_notifications_per_publish,
-                priority,
-            };
-            let response = self.send_request(request)?;
-            if let SupportedMessage::ModifySubscriptionResponse(response) = response {
-                crate::process_service_result(&response.response_header)?;
-                let mut subscription_state = trace_write_lock_unwrap!(self.subscription_state);
-                subscription_state.modify_subscription(subscription_id,
-                                                       response.revised_publishing_interval,
-                                                       response.revised_lifetime_count,
-                                                       response.revised_max_keep_alive_count,
-                                                       max_notifications_per_publish,
-                                                       priority);
-                debug!("modify_subscription success for {}", subscription_id);
-                Ok(())
+    pub fn call_get_monitored_items(&mut self, subscription_id: u32) -> Result<(Vec<u32>, Vec<u32>), StatusCode> {
+        let args = Some(vec![Variant::from(subscription_id)]);
+        let object_id: NodeId = ObjectId::Server.into();
+        let method_id: NodeId = MethodId::Server_GetMonitoredItems.into();
+        let request: CallMethodRequest = (object_id, method_id, args).into();
+        let response = self.call(request)?;
+        if let Some(mut result) = response.output_arguments {
+            if result.len() == 2 {
+                let server_handles = <Vec<u32>>::try_from(&result.remove(0)).map_err(|_| StatusCode::BadUnexpectedError)?;
+                let client_handles = <Vec<u32>>::try_from(&result.remove(0)).map_err(|_| StatusCode::BadUnexpectedError)?;
+                Ok((server_handles, client_handles))
             } else {
-                error!("modify_subscription failed {:?}", response);
-                Err(crate::process_unexpected_response(response))
+                error!("Expected a result with 2 args and didn't get it.");
+                Err(StatusCode::BadUnexpectedError)
             }
+        } else {
+            error!("Expected a result and didn't get it.");
+            Err(StatusCode::BadUnexpectedError)
         }
     }
 
-    /// Deletes a subscription by sending a [`DeleteSubscriptionsRequest`] to the server.
-    ///
-    /// # Arguments
-    ///
-    /// * `subscription_id` - subscription identifier returned from `create_subscription`.
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(StatusCode)` - Service return code for the delete action, `Good` or `BadSubscriptionIdInvalid`
-    /// * `Err(StatusCode)` - Status code reason for failure
-    ///
-    /// [`DeleteSubscriptionsRequest`]: ./struct.DeleteSubscriptionsRequest.html
-    ///
-    pub fn delete_subscription(&mut self, subscription_id: u32) -> Result<StatusCode, StatusCode> {
-        if subscription_id == 0 {
-            error!("delete_subscription, subscription id 0 is invalid");
-            Err(StatusCode::BadInvalidArgument)
-        } else if !self.subscription_exists(subscription_id) {
-            error!("delete_subscription, subscription id {} does not exist", subscription_id);
-            Err(StatusCode::BadInvalidArgument)
-        } else {
-            let result = self.delete_subscriptions(&[subscription_id][..])?;
-            Ok(result[0])
-        }
-    }
-
-    /// Deletes subscriptions by sending a [`DeleteSubscriptionsRequest`] to the server with the list
-    /// of subscriptions to delete.
-    ///
-    /// # Arguments
-    ///
-    /// * `subscription_ids` - List of subscription identifiers to delete.
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(Vec<StatusCode>)` - List of result for delete action on each id, `Good` or `BadSubscriptionIdInvalid`
-    ///   The size and order of the list matches the size and order of the input.
-    /// * `Err(StatusCode)` - Status code reason for failure
-    ///
-    /// [`DeleteSubscriptionsRequest`]: ./struct.DeleteSubscriptionsRequest.html
-    ///
-    pub fn delete_subscriptions(&mut self, subscription_ids: &[u32]) -> Result<Vec<StatusCode>, StatusCode> {
-        if subscription_ids.is_empty() {
-            // No subscriptions
-            trace!("delete_subscriptions with no subscriptions");
-            Err(StatusCode::BadNothingToDo)
-        } else {
-            // Send a delete request holding all the subscription ides that we wish to delete
-            let request = DeleteSubscriptionsRequest {
-                request_header: self.make_request_header(),
-                subscription_ids: Some(subscription_ids.to_vec()),
-            };
-            let response = self.send_request(request)?;
-            if let SupportedMessage::DeleteSubscriptionsResponse(response) = response {
-                crate::process_service_result(&response.response_header)?;
-                {
-                    // Clear out deleted subscriptions, assuming the delete worked
-                    let mut subscription_state = trace_write_lock_unwrap!(self.subscription_state);
-                    subscription_ids.iter().for_each(|id| {
-                        let _ = subscription_state.delete_subscription(*id);
-                    });
-                }
-                debug!("delete_subscriptions success");
-                Ok(response.results.unwrap())
-            } else {
-                error!("delete_subscriptions failed {:?}", response);
-                Err(crate::process_unexpected_response(response))
-            }
-        }
-    }
-
-    /// Deletes all subscriptions by sending a [`DeleteSubscriptionsRequest`] to the server with
-    /// ids for all subscriptions.
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(Vec<(u32, StatusCode)>)` - List of (id, status code) result for delete action on each id, `Good` or `BadSubscriptionIdInvalid`
-    /// * `Err(StatusCode)` - Status code reason for failure
-    ///
-    /// [`DeleteSubscriptionsRequest`]: ./struct.DeleteSubscriptionsRequest.html
-    ///
-    pub fn delete_all_subscriptions(&mut self) -> Result<Vec<(u32, StatusCode)>, StatusCode> {
-        let subscription_ids = {
-            let subscription_state = trace_read_lock_unwrap!(self.subscription_state);
-            subscription_state.subscription_ids()
-        };
-        if let Some(ref subscription_ids) = subscription_ids {
-            let status_codes = self.delete_subscriptions(&subscription_ids[..])?;
-            // Return a list of (id, status_code) for each subscription
-            Ok(subscription_ids.iter().zip(status_codes).map(|(id, status_code)| (*id, status_code)).collect())
-        } else {
-            // No subscriptions
-            trace!("delete_all_subscriptions, called when there are no subscriptions");
-            Err(StatusCode::BadNothingToDo)
-        }
-    }
-
-    /// Transfers Subscriptions and their MonitoredItems from one Session to another. For example,
-    /// a Client may need to reopen a Session and then transfer its Subscriptions to that Session.
-    /// It may also be used by one Client to take over a Subscription from another Client by
-    /// transferring the Subscription to its Session.
-    ///
-    /// * `subscription_ids` - one or more subscription identifiers.
-    /// * `send_initial_values` - A boolean parameter with the following values - `true` the first
-    ///   publish response shall contain the current values of all monitored items in the subscription,
-    ///   `false`, the first publish response shall contain only the value changes since the last
-    ///   publish response was sent.
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(Vec<TransferResult>)` - Service return code for each transfer subscription.
-    /// * `Err(StatusCode)` - Status code reason for failure
-    ///
-    /// [`TransferSubscriptionsRequest`]: ./struct.TransferSubscriptionsRequest.html
-    ///
-    pub fn transfer_subscriptions(&mut self, subscription_ids: &[u32], send_initial_values: bool) -> Result<Vec<TransferResult>, StatusCode> {
-        if subscription_ids.is_empty() {
-            // No subscriptions
-            error!("set_publishing_mode, no subscription ids were provided");
-            Err(StatusCode::BadNothingToDo)
-        } else {
-            let request = TransferSubscriptionsRequest {
-                request_header: self.make_request_header(),
-                subscription_ids: Some(subscription_ids.to_vec()),
-                send_initial_values,
-            };
-            let response = self.send_request(request)?;
-            if let SupportedMessage::TransferSubscriptionsResponse(response) = response {
-                crate::process_service_result(&response.response_header)?;
-                debug!("transfer_subscriptions success");
-                Ok(response.results.unwrap())
-            } else {
-                error!("transfer_subscriptions failed {:?}", response);
-                Err(crate::process_unexpected_response(response))
-            }
-        }
-    }
-
-    /// Changes the publishing mode of subscriptiongs by sending a [`SetPublishingModeRequest`] to the server.
-    ///
-    /// # Arguments
-    ///
-    /// * `subscription_ids` - one or more subscription identifiers.
-    /// * `publishing_enabled` - A boolean parameter with the following values - `true` publishing
-    ///   is enabled for the Subscriptions, `false`, publishing is disabled for the Subscriptions.
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(Vec<StatusCode>)` - Service return code for the  action for each id, `Good` or `BadSubscriptionIdInvalid`
-    /// * `Err(StatusCode)` - Status code reason for failure
-    ///
-    /// [`SetPublishingModeRequest`]: ./struct.SetPublishingModeRequest.html
-    ///
-    pub fn set_publishing_mode(&mut self, subscription_ids: &[u32], publishing_enabled: bool) -> Result<Vec<StatusCode>, StatusCode> {
-        debug!("set_publishing_mode, for subscriptions {:?}, publishing enabled {}", subscription_ids, publishing_enabled);
-        if subscription_ids.is_empty() {
-            // No subscriptions
-            error!("set_publishing_mode, no subscription ids were provided");
-            Err(StatusCode::BadNothingToDo)
-        } else {
-            let request = SetPublishingModeRequest {
-                request_header: self.make_request_header(),
-                publishing_enabled,
-                subscription_ids: Some(subscription_ids.to_vec()),
-            };
-            let response = self.send_request(request)?;
-            if let SupportedMessage::SetPublishingModeResponse(response) = response {
-                crate::process_service_result(&response.response_header)?;
-                {
-                    // Clear out all subscriptions, assuming the delete worked
-                    let mut subscription_state = trace_write_lock_unwrap!(self.subscription_state);
-                    subscription_state.set_publishing_mode(subscription_ids, publishing_enabled);
-                }
-                debug!("set_publishing_mode success");
-                Ok(response.results.unwrap())
-            } else {
-                error!("set_publishing_mode failed {:?}", response);
-                Err(crate::process_unexpected_response(response))
-            }
-        }
-    }
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+    // MonitoredItem Service set
+    ////////////////////////////////////////////////////////////////////////////////////////////////
 
     /// Creates monitored items on a subscription by sending a [`CreateMonitoredItemsRequest`] to the server.
+    ///
+    /// See OPC UA Part 4 - Services 5.12.2 for complete description of the service and error responses.
     ///
     /// # Arguments
     ///
     /// * `subscription_id` - The Server-assigned identifier for the Subscription that will report Notifications for this MonitoredItem
     /// * `timestamps_to_return` - An enumeration that specifies the timestamp Attributes to be transmitted for each MonitoredItem.
-    /// * `items_to_create` - A list of MonitoredItems to be created and assigned to the specified Subscription.
+    /// * `items_to_create` - A list of [`MonitoredItemCreateRequest`] to be created and assigned to the specified Subscription.
     ///
     /// # Returns
     ///
-    /// * `Ok(Vec<MonitoredItemCreateResult>)` - List of results for the MonitoredItems to create.
+    /// * `Ok(Vec<MonitoredItemCreateResult>)` - A list of [`MonitoredItemCreateResult`] corresponding to the items to create.
     ///    The size and order of the list matches the size and order of the `items_to_create` request parameter.
     /// * `Err(StatusCode)` - Status code reason for failure
     ///
     /// [`CreateMonitoredItemsRequest`]: ./struct.CreateMonitoredItemsRequest.html
+    /// [`MonitoredItemCreateRequest`]: ./struct.MonitoredItemCreateRequest.html
+    /// [`MonitoredItemCreateResult`]: ./struct.MonitoredItemCreateResult.html
     ///
     pub fn create_monitored_items(&mut self, subscription_id: u32, timestamps_to_return: TimestampsToReturn, items_to_create: &[MonitoredItemCreateRequest]) -> Result<Vec<MonitoredItemCreateResult>, StatusCode> {
         debug!("create_monitored_items, for subscription {}, {} items", subscription_id, items_to_create.len());
@@ -1283,19 +1596,23 @@ impl Session {
 
     /// Modifies monitored items on a subscription by sending a [`ModifyMonitoredItemsRequest`] to the server.
     ///
+    /// See OPC UA Part 4 - Services 5.12.3 for complete description of the service and error responses.
+    ///
     /// # Arguments
     ///
     /// * `subscription_id` - The Server-assigned identifier for the Subscription that will report Notifications for this MonitoredItem.
     /// * `timestamps_to_return` - An enumeration that specifies the timestamp Attributes to be transmitted for each MonitoredItem.
-    /// * `items_to_modify` - The list of MonitoredItems to modify.
+    /// * `items_to_modify` - The list of [`MonitoredItemModifyRequest`] to modify.
     ///
     /// # Returns
     ///
-    /// * `Ok(Vec<MonitoredItemModifyResult>)` - List of results for the MonitoredItems to modify.
+    /// * `Ok(Vec<MonitoredItemModifyResult>)` - A list of [`MonitoredItemModifyResult`] corresponding to the MonitoredItems to modify.
     ///    The size and order of the list matches the size and order of the `items_to_modify` request parameter.
     /// * `Err(StatusCode)` - Status code reason for failure.
     ///
     /// [`ModifyMonitoredItemsRequest`]: ./struct.ModifyMonitoredItemsRequest.html
+    /// [`MonitoredItemModifyRequest`]: ./struct.MonitoredItemModifyRequest.html
+    /// [`MonitoredItemModifyResult`]: ./struct.MonitoredItemModifyResult.html
     ///
     pub fn modify_monitored_items(&mut self, subscription_id: u32, timestamps_to_return: TimestampsToReturn, items_to_modify: &[MonitoredItemModifyRequest]) -> Result<Vec<MonitoredItemModifyResult>, StatusCode> {
         debug!("modify_monitored_items, for subscription {}, {} items", subscription_id, items_to_modify.len());
@@ -1347,12 +1664,105 @@ impl Session {
         }
     }
 
+    /// Sets the monitoring mode on one or more monitored items by sending a [`SetMonitoringModeRequest`]
+    /// to the server.
+    ///
+    /// See OPC UA Part 4 - Services 5.12.4 for complete description of the service and error responses.
+    ///
+    /// # Arguments
+    ///
+    /// * `subscription_id` - the subscription identifier containing the monitored items to be modified.
+    /// * `monitoring_mode` - the monitored mode to apply to the monitored items
+    /// * `monitored_item_ids` - the monitored items to be modified
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<StatusCode>)` - Individual result for each monitored item.
+    /// * `Err(StatusCode)` - Status code reason for failure.
+    ///
+    /// [`SetMonitoringModeRequest`]: ./struct.SetMonitoringModeRequest.html
+    ///
+    pub fn set_monitoring_mode(&mut self, subscription_id: u32, monitoring_mode: MonitoringMode, monitored_item_ids: &[u32]) -> Result<Vec<StatusCode>, StatusCode> {
+        if monitored_item_ids.is_empty() {
+            error!("set_monitoring_mode, called with nothing to do");
+            Err(StatusCode::BadNothingToDo)
+        } else {
+            let request = {
+                let monitored_item_ids = Some(monitored_item_ids.to_vec());
+                SetMonitoringModeRequest {
+                    request_header: self.make_request_header(),
+                    subscription_id,
+                    monitoring_mode,
+                    monitored_item_ids,
+                }
+            };
+            let response = self.send_request(request)?;
+            if let SupportedMessage::SetMonitoringModeResponse(response) = response {
+                Ok(response.results.unwrap())
+            } else {
+                error!("set_monitoring_mode failed {:?}", response);
+                Err(crate::process_unexpected_response(response))
+            }
+        }
+    }
+
+    /// Sets a monitored item so it becomes the trigger that causes other monitored items to send
+    /// change events in the same update. Sends a [`SetTriggeringRequest`] to the server.
+    /// Note that `items_to_remove` is applied before `items_to_add`.
+    ///
+    /// See OPC UA Part 4 - Services 5.12.5 for complete description of the service and error responses.
+    ///
+    /// # Arguments
+    ///
+    /// * `subscription_id` - the subscription identifier containing the monitored item to be used as the trigger.
+    /// * `monitored_item_id` - the monitored item that is the trigger.
+    /// * `links_to_add` - zero or more items to be added to the monitored item's triggering list.
+    /// * `items_to_remove` - zero or more items to be removed from the monitored item's triggering list.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok((Option<Vec<StatusCode>>, Option<Vec<StatusCode>>))` - Individual result for each item added / removed for the SetTriggering call.
+    /// * `Err(StatusCode)` - Status code reason for failure.
+    ///
+    /// [`SetTriggeringRequest`]: ./struct.SetTriggeringRequest.html
+    ///
+    pub fn set_triggering(&mut self, subscription_id: u32, triggering_item_id: u32, links_to_add: &[u32], links_to_remove: &[u32]) -> Result<(Option<Vec<StatusCode>>, Option<Vec<StatusCode>>), StatusCode> {
+        if links_to_add.is_empty() && links_to_remove.is_empty() {
+            error!("set_triggering, called with nothing to add or remove");
+            Err(StatusCode::BadNothingToDo)
+        } else {
+            let request = {
+                let links_to_add = if links_to_add.is_empty() { None } else { Some(links_to_add.to_vec()) };
+                let links_to_remove = if links_to_remove.is_empty() { None } else { Some(links_to_remove.to_vec()) };
+                SetTriggeringRequest {
+                    request_header: self.make_request_header(),
+                    subscription_id,
+                    triggering_item_id,
+                    links_to_add,
+                    links_to_remove,
+                }
+            };
+            let response = self.send_request(request)?;
+            if let SupportedMessage::SetTriggeringResponse(response) = response {
+                // Update client side state
+                let mut subscription_state = trace_write_lock_unwrap!(self.subscription_state);
+                subscription_state.set_triggering(subscription_id, triggering_item_id, links_to_add, links_to_remove);
+                Ok((response.add_results, response.remove_results))
+            } else {
+                error!("set_triggering failed {:?}", response);
+                Err(crate::process_unexpected_response(response))
+            }
+        }
+    }
+
     /// Deletes monitored items from a subscription by sending a [`DeleteMonitoredItemsRequest`] to the server.
+    ///
+    /// See OPC UA Part 4 - Services 5.12.6 for complete description of the service and error responses.
     ///
     /// # Arguments
     ///
     /// * `subscription_id` - The Server-assigned identifier for the Subscription that will report Notifications for this MonitoredItem.
-    /// * `items_to_delete` - List of Server-assigned ids for the MonitoredItems to be deleted..
+    /// * `items_to_delete` - List of Server-assigned ids for the MonitoredItems to be deleted.
     ///
     /// # Returns
     ///
@@ -1382,7 +1792,7 @@ impl Session {
             let response = self.send_request(request)?;
             if let SupportedMessage::DeleteMonitoredItemsResponse(response) = response {
                 crate::process_service_result(&response.response_header)?;
-                if let Some(_) = response.results {
+                if response.results.is_some() {
                     let mut subscription_state = trace_write_lock_unwrap!(self.subscription_state);
                     subscription_state.delete_monitored_items(subscription_id, items_to_delete);
                 }
@@ -1395,78 +1805,355 @@ impl Session {
         }
     }
 
-    /// Calls a single method on an object on the server by sending a [`CallRequest`] to the server.
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+    // Subscription Service set
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /// Create a subscription by sending a [`CreateSubscriptionRequest`] to the server.
+    ///
+    /// See OPC UA Part 4 - Services 5.13.2 for complete description of the service and error responses.
     ///
     /// # Arguments
     ///
-    /// * `method` - The method to call. Note this function takes anything that can be turned into
-    ///   a [`CallMethodRequest`] which includes a (`NodeId`, `NodeId`, `Option<Vec<Variant>>`)
-    ///   which refers to the object id, method id, and input arguments respectively.
-    /// * `items_to_delete` - List of Server-assigned ids for the MonitoredItems to be deleted..
+    /// * `publishing_interval` - The requested publishing interval defines the cyclic rate that
+    ///   the Subscription is being requested to return Notifications to the Client. This interval
+    ///   is expressed in milliseconds. This interval is represented by the publishing timer in the
+    ///   Subscription state table. The negotiated value for this parameter returned in the
+    ///   response is used as the default sampling interval for MonitoredItems assigned to this
+    ///   Subscription. If the requested value is 0 or negative, the server shall revise with the
+    ///   fastest supported publishing interval in milliseconds.
+    /// * `lifetime_count` - Requested lifetime count. The lifetime count shall be a minimum of
+    ///   three times the keep keep-alive count. When the publishing timer has expired this
+    ///   number of times without a Publish request being available to send a NotificationMessage,
+    ///   then the Subscription shall be deleted by the Server.
+    /// * `max_keep_alive_count` - Requested maximum keep-alive count. When the publishing timer has
+    ///   expired this number of times without requiring any NotificationMessage to be sent, the
+    ///   Subscription sends a keep-alive Message to the Client. The negotiated value for this
+    ///   parameter is returned in the response. If the requested value is 0, the server shall
+    ///   revise with the smallest supported keep-alive count.
+    /// * `max_notifications_per_publish` - The maximum number of notifications that the Client
+    ///   wishes to receive in a single Publish response. A value of zero indicates that there is
+    ///   no limit. The number of notifications per Publish is the sum of monitoredItems in
+    ///   the DataChangeNotification and events in the EventNotificationList.
+    /// * `priority` - Indicates the relative priority of the Subscription. When more than one
+    ///   Subscription needs to send Notifications, the Server should de-queue a Publish request
+    ///   to the Subscription with the highest priority number. For Subscriptions with equal
+    ///   priority the Server should de-queue Publish requests in a round-robin fashion.
+    ///   A Client that does not require special priority settings should set this value to zero.
+    /// * `publishing_enabled` - A boolean parameter with the following values - `true` publishing
+    ///   is enabled for the Subscription, `false`, publishing is disabled for the Subscription.
+    ///   The value of this parameter does not affect the value of the monitoring mode Attribute of
+    ///   MonitoredItems.
     ///
     /// # Returns
     ///
-    /// * `Ok(CallMethodResult)` - Result for the Method call.
-    /// * `Err(StatusCode)` - Status code reason for failure.
+    /// * `Ok(u32)` - identifier for new subscription
+    /// * `Err(StatusCode)` - Status code reason for failure
     ///
-    /// [`CallRequest`]: ./struct.CallRequest.html
-    /// [`CallMethodRequest`]: ./struct.CallMethodRequest.html
+    /// [`CreateSubscriptionRequest`]: ./struct.CreateSubscriptionRequest.html
     ///
-    pub fn call_method<T>(&mut self, method: T) -> Result<CallMethodResult, StatusCode> where T: Into<CallMethodRequest> {
-        debug!("call_method");
-        let methods_to_call = Some(vec![method.into()]);
-        let request = CallRequest {
+    pub fn create_subscription<CB>(&mut self, publishing_interval: f64, lifetime_count: u32, max_keep_alive_count: u32, max_notifications_per_publish: u32, priority: u8, publishing_enabled: bool, callback: CB)
+                                   -> Result<u32, StatusCode>
+        where CB: OnDataChange + Send + Sync + 'static {
+        self.create_subscription_inner(publishing_interval, lifetime_count, max_keep_alive_count, max_notifications_per_publish, priority, publishing_enabled, Arc::new(Mutex::new(callback)))
+    }
+
+    /// This is the internal handler for create subscription that receives the callback wrapped up and reference counted.
+    fn create_subscription_inner(&mut self, publishing_interval: f64, lifetime_count: u32, max_keep_alive_count: u32, max_notifications_per_publish: u32,
+                                 priority: u8, publishing_enabled: bool,
+                                 callback: Arc<Mutex<dyn OnDataChange + Send + Sync + 'static>>)
+                                 -> Result<u32, StatusCode>
+    {
+        let request = CreateSubscriptionRequest {
             request_header: self.make_request_header(),
-            methods_to_call,
+            requested_publishing_interval: publishing_interval,
+            requested_lifetime_count: lifetime_count,
+            requested_max_keep_alive_count: max_keep_alive_count,
+            max_notifications_per_publish,
+            publishing_enabled,
+            priority,
         };
         let response = self.send_request(request)?;
-        if let SupportedMessage::CallResponse(response) = response {
-            if let Some(mut results) = response.results {
-                if results.len() != 1 {
-                    error!("call_method, expecting a result from the call to the server, got {} results", results.len());
-                    Err(StatusCode::BadUnexpectedError)
-                } else {
-                    Ok(results.remove(0))
-                }
-            } else {
-                error!("call_method, expecting a result from the call to the server, got nothing");
-                Err(StatusCode::BadUnexpectedError)
+        if let SupportedMessage::CreateSubscriptionResponse(response) = response {
+            crate::process_service_result(&response.response_header)?;
+            let subscription = Subscription::new(response.subscription_id, response.revised_publishing_interval,
+                                                 response.revised_lifetime_count,
+                                                 response.revised_max_keep_alive_count,
+                                                 max_notifications_per_publish,
+                                                 publishing_enabled,
+                                                 priority,
+                                                 callback);
+
+            {
+                let subscription_id = {
+                    let mut subscription_state = trace_write_lock_unwrap!(self.subscription_state);
+                    let subscription_id = subscription.subscription_id();
+                    subscription_state.add_subscription(subscription);
+                    subscription_id
+                };
+                let _ = self.timer_command_queue.unbounded_send(SubscriptionTimerCommand::CreateTimer(subscription_id));
             }
+            debug!("create_subscription, created a subscription with id {}", response.subscription_id);
+            Ok(response.subscription_id)
         } else {
+            error!("create_subscription failed {:?}", response);
             Err(crate::process_unexpected_response(response))
         }
     }
 
-    /// Calls GetMonitoredItems via call_method(), putting a sane interface on the input / output.
+    /// Modifies a subscription by sending a [`ModifySubscriptionRequest`] to the server.
+    ///
+    /// See OPC UA Part 4 - Services 5.13.3 for complete description of the service and error responses.
     ///
     /// # Arguments
     ///
-    /// * `subscription_id` - Server allocated identifier for the subscription to return monitored items for.
+    /// * `subscription_id` - subscription identifier returned from `create_subscription`.
+    ///
+    /// See `create_subscription` for description of other parameters
     ///
     /// # Returns
     ///
-    /// * `Ok((Vec<u32>, Vec<u32>))` - Result for call, consisting a list of (monitored_item_id, client_handle)
-    /// * `Err(StatusCode)` - Status code reason for failure.
+    /// * `Ok(())` - Success
+    /// * `Err(StatusCode)` - Request failed, status code is the reason for failure
     ///
-    pub fn call_get_monitored_items(&mut self, subscription_id: u32) -> Result<(Vec<u32>, Vec<u32>), StatusCode> {
-        let args = Some(vec![Variant::from(subscription_id)]);
-        let object_id: NodeId = ObjectId::Server.into();
-        let method_id: NodeId = MethodId::Server_GetMonitoredItems.into();
-        let request: CallMethodRequest = (object_id, method_id, args).into();
-        let response = self.call_method(request)?;
-        if let Some(mut result) = response.output_arguments {
-            if result.len() == 2 {
-                let server_handles = result.remove(0).as_u32_array().map_err(|_| StatusCode::BadUnexpectedError)?;
-                let client_handles = result.remove(0).as_u32_array().map_err(|_| StatusCode::BadUnexpectedError)?;
-                Ok((server_handles, client_handles))
-            } else {
-                error!("Expected a result with 2 args and didn't get it.");
-                Err(StatusCode::BadUnexpectedError)
-            }
+    /// [`ModifySubscriptionRequest`]: ./struct.ModifySubscriptionRequest.html
+    ///
+    pub fn modify_subscription(&mut self, subscription_id: u32, publishing_interval: f64, lifetime_count: u32, max_keep_alive_count: u32, max_notifications_per_publish: u32, priority: u8) -> Result<(), StatusCode> {
+        if subscription_id == 0 {
+            error!("modify_subscription, subscription id must be non-zero, or the subscription is considered invalid");
+            Err(StatusCode::BadInvalidArgument)
+        } else if !self.subscription_exists(subscription_id) {
+            error!("modify_subscription, subscription id does not exist");
+            Err(StatusCode::BadInvalidArgument)
         } else {
-            error!("Expected a result and didn't get it.");
-            Err(StatusCode::BadUnexpectedError)
+            let request = ModifySubscriptionRequest {
+                request_header: self.make_request_header(),
+                subscription_id,
+                requested_publishing_interval: publishing_interval,
+                requested_lifetime_count: lifetime_count,
+                requested_max_keep_alive_count: max_keep_alive_count,
+                max_notifications_per_publish,
+                priority,
+            };
+            let response = self.send_request(request)?;
+            if let SupportedMessage::ModifySubscriptionResponse(response) = response {
+                crate::process_service_result(&response.response_header)?;
+                let mut subscription_state = trace_write_lock_unwrap!(self.subscription_state);
+                subscription_state.modify_subscription(subscription_id,
+                                                       response.revised_publishing_interval,
+                                                       response.revised_lifetime_count,
+                                                       response.revised_max_keep_alive_count,
+                                                       max_notifications_per_publish,
+                                                       priority);
+                debug!("modify_subscription success for {}", subscription_id);
+                Ok(())
+            } else {
+                error!("modify_subscription failed {:?}", response);
+                Err(crate::process_unexpected_response(response))
+            }
         }
+    }
+
+    /// Changes the publishing mode of subscriptions by sending a [`SetPublishingModeRequest`] to the server.
+    ///
+    /// See OPC UA Part 4 - Services 5.13.4 for complete description of the service and error responses.
+    ///
+    /// # Arguments
+    ///
+    /// * `subscription_ids` - one or more subscription identifiers.
+    /// * `publishing_enabled` - A boolean parameter with the following values - `true` publishing
+    ///   is enabled for the Subscriptions, `false`, publishing is disabled for the Subscriptions.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<StatusCode>)` - Service return code for the  action for each id, `Good` or `BadSubscriptionIdInvalid`
+    /// * `Err(StatusCode)` - Status code reason for failure
+    ///
+    /// [`SetPublishingModeRequest`]: ./struct.SetPublishingModeRequest.html
+    ///
+    pub fn set_publishing_mode(&mut self, subscription_ids: &[u32], publishing_enabled: bool) -> Result<Vec<StatusCode>, StatusCode> {
+        debug!("set_publishing_mode, for subscriptions {:?}, publishing enabled {}", subscription_ids, publishing_enabled);
+        if subscription_ids.is_empty() {
+            // No subscriptions
+            error!("set_publishing_mode, no subscription ids were provided");
+            Err(StatusCode::BadNothingToDo)
+        } else {
+            let request = SetPublishingModeRequest {
+                request_header: self.make_request_header(),
+                publishing_enabled,
+                subscription_ids: Some(subscription_ids.to_vec()),
+            };
+            let response = self.send_request(request)?;
+            if let SupportedMessage::SetPublishingModeResponse(response) = response {
+                crate::process_service_result(&response.response_header)?;
+                {
+                    // Clear out all subscriptions, assuming the delete worked
+                    let mut subscription_state = trace_write_lock_unwrap!(self.subscription_state);
+                    subscription_state.set_publishing_mode(subscription_ids, publishing_enabled);
+                }
+                debug!("set_publishing_mode success");
+                Ok(response.results.unwrap())
+            } else {
+                error!("set_publishing_mode failed {:?}", response);
+                Err(crate::process_unexpected_response(response))
+            }
+        }
+    }
+
+    /// Transfers Subscriptions and their MonitoredItems from one Session to another. For example,
+    /// a Client may need to reopen a Session and then transfer its Subscriptions to that Session.
+    /// It may also be used by one Client to take over a Subscription from another Client by
+    /// transferring the Subscription to its Session.
+    ///
+    /// See OPC UA Part 4 - Services 5.13.7 for complete description of the service and error responses.
+    ///
+    /// * `subscription_ids` - one or more subscription identifiers.
+    /// * `send_initial_values` - A boolean parameter with the following values - `true` the first
+    ///   publish response shall contain the current values of all monitored items in the subscription,
+    ///   `false`, the first publish response shall contain only the value changes since the last
+    ///   publish response was sent.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<TransferResult>)` - The [`TransferResult`] for each transfer subscription.
+    /// * `Err(StatusCode)` - Status code reason for failure
+    ///
+    /// [`TransferSubscriptionsRequest`]: ./struct.TransferSubscriptionsRequest.html
+    /// [`TransferResult`]: ./struct.TransferResult.html
+    ///
+    pub fn transfer_subscriptions(&mut self, subscription_ids: &[u32], send_initial_values: bool) -> Result<Vec<TransferResult>, StatusCode> {
+        if subscription_ids.is_empty() {
+            // No subscriptions
+            error!("set_publishing_mode, no subscription ids were provided");
+            Err(StatusCode::BadNothingToDo)
+        } else {
+            let request = TransferSubscriptionsRequest {
+                request_header: self.make_request_header(),
+                subscription_ids: Some(subscription_ids.to_vec()),
+                send_initial_values,
+            };
+            let response = self.send_request(request)?;
+            if let SupportedMessage::TransferSubscriptionsResponse(response) = response {
+                crate::process_service_result(&response.response_header)?;
+                debug!("transfer_subscriptions success");
+                Ok(response.results.unwrap())
+            } else {
+                error!("transfer_subscriptions failed {:?}", response);
+                Err(crate::process_unexpected_response(response))
+            }
+        }
+    }
+
+    /// Deletes a subscription by sending a [`DeleteSubscriptionsRequest`] to the server.
+    ///
+    /// See OPC UA Part 4 - Services 5.13.8 for complete description of the service and error responses.
+    ///
+    /// # Arguments
+    ///
+    /// * `subscription_id` - subscription identifier returned from `create_subscription`.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(StatusCode)` - Service return code for the delete action, `Good` or `BadSubscriptionIdInvalid`
+    /// * `Err(StatusCode)` - Status code reason for failure
+    ///
+    /// [`DeleteSubscriptionsRequest`]: ./struct.DeleteSubscriptionsRequest.html
+    ///
+    pub fn delete_subscription(&mut self, subscription_id: u32) -> Result<StatusCode, StatusCode> {
+        if subscription_id == 0 {
+            error!("delete_subscription, subscription id 0 is invalid");
+            Err(StatusCode::BadInvalidArgument)
+        } else if !self.subscription_exists(subscription_id) {
+            error!("delete_subscription, subscription id {} does not exist", subscription_id);
+            Err(StatusCode::BadInvalidArgument)
+        } else {
+            let result = self.delete_subscriptions(&[subscription_id][..])?;
+            Ok(result[0])
+        }
+    }
+
+    /// Deletes subscriptions by sending a [`DeleteSubscriptionsRequest`] to the server with the list
+    /// of subscriptions to delete.
+    ///
+    /// See OPC UA Part 4 - Services 5.13.8 for complete description of the service and error responses.
+    ///
+    /// # Arguments
+    ///
+    /// * `subscription_ids` - List of subscription identifiers to delete.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<StatusCode>)` - List of result for delete action on each id, `Good` or `BadSubscriptionIdInvalid`
+    ///   The size and order of the list matches the size and order of the input.
+    /// * `Err(StatusCode)` - Status code reason for failure
+    ///
+    /// [`DeleteSubscriptionsRequest`]: ./struct.DeleteSubscriptionsRequest.html
+    ///
+    pub fn delete_subscriptions(&mut self, subscription_ids: &[u32]) -> Result<Vec<StatusCode>, StatusCode> {
+        if subscription_ids.is_empty() {
+            // No subscriptions
+            trace!("delete_subscriptions with no subscriptions");
+            Err(StatusCode::BadNothingToDo)
+        } else {
+            // Send a delete request holding all the subscription ides that we wish to delete
+            let request = DeleteSubscriptionsRequest {
+                request_header: self.make_request_header(),
+                subscription_ids: Some(subscription_ids.to_vec()),
+            };
+            let response = self.send_request(request)?;
+            if let SupportedMessage::DeleteSubscriptionsResponse(response) = response {
+                crate::process_service_result(&response.response_header)?;
+                {
+                    // Clear out deleted subscriptions, assuming the delete worked
+                    let mut subscription_state = trace_write_lock_unwrap!(self.subscription_state);
+                    subscription_ids.iter().for_each(|id| {
+                        let _ = subscription_state.delete_subscription(*id);
+                    });
+                }
+                debug!("delete_subscriptions success");
+                Ok(response.results.unwrap())
+            } else {
+                error!("delete_subscriptions failed {:?}", response);
+                Err(crate::process_unexpected_response(response))
+            }
+        }
+    }
+
+    /// Deletes all subscriptions by sending a [`DeleteSubscriptionsRequest`] to the server with
+    /// ids for all subscriptions.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<(u32, StatusCode)>)` - List of (id, status code) result for delete action on each id, `Good` or `BadSubscriptionIdInvalid`
+    /// * `Err(StatusCode)` - Status code reason for failure
+    ///
+    /// [`DeleteSubscriptionsRequest`]: ./struct.DeleteSubscriptionsRequest.html
+    ///
+    pub fn delete_all_subscriptions(&mut self) -> Result<Vec<(u32, StatusCode)>, StatusCode> {
+        let subscription_ids = {
+            let subscription_state = trace_read_lock_unwrap!(self.subscription_state);
+            subscription_state.subscription_ids()
+        };
+        if let Some(ref subscription_ids) = subscription_ids {
+            let status_codes = self.delete_subscriptions(subscription_ids.as_slice())?;
+            // Return a list of (id, status_code) for each subscription
+            Ok(subscription_ids.iter().zip(status_codes).map(|(id, status_code)| (*id, status_code)).collect())
+        } else {
+            // No subscriptions
+            trace!("delete_all_subscriptions, called when there are no subscriptions");
+            Err(StatusCode::BadNothingToDo)
+        }
+    }
+
+    /// Returns the subscription state object
+    pub fn subscription_state(&self) -> Arc<RwLock<SubscriptionState>> {
+        self.subscription_state.clone()
+    }
+
+    /// Returns the security policy
+    fn security_policy(&self) -> SecurityPolicy {
+        let secure_channel = trace_read_lock_unwrap!(self.secure_channel);
+        secure_channel.security_policy()
     }
 
     // Test if the subscription by id exists
@@ -1495,35 +2182,51 @@ impl Session {
             client::IdentityToken::UserName(_, _) => {
                 UserTokenType::Username
             }
+            client::IdentityToken::X509(_, _) => {
+                // TODO
+                panic!();
+            }
         };
 
         let endpoint = &self.session_info.endpoint;
-        let policy_id = endpoint.find_policy_id(user_token_type);
+        let policy = endpoint.find_policy(user_token_type);
 
         // Return the result
-        if policy_id.is_none() {
-            error!("Cannot find user token type {:?} for this endpoint, cannot connect", user_token_type);
-            Err(StatusCode::BadSecurityPolicyRejected)
-        } else {
-            match self.session_info.user_identity_token {
-                client::IdentityToken::Anonymous => {
-                    let token = AnonymousIdentityToken {
-                        policy_id: policy_id.unwrap(),
-                    };
-                    Ok(ExtensionObject::from_encodable(ObjectId::AnonymousIdentityToken_Encoding_DefaultBinary, &token))
-                }
-                client::IdentityToken::UserName(ref user, ref pass) => {
-                    // TODO Check that the security policy is something we can supply
-                    let token = UserNameIdentityToken {
-                        policy_id: policy_id.unwrap(),
-                        user_name: UAString::from(user.as_ref()),
-                        password: ByteString::from(pass.as_bytes()),
-                        encryption_algorithm: UAString::null(),
-                    };
-                    Ok(ExtensionObject::from_encodable(ObjectId::UserNameIdentityToken_Encoding_DefaultBinary, &token))
+        match policy {
+            None => {
+                error!("Cannot find user token type {:?} for this endpoint, cannot connect", user_token_type);
+                Err(StatusCode::BadSecurityPolicyRejected)
+            }
+            Some(policy) => {
+                match self.session_info.user_identity_token {
+                    client::IdentityToken::Anonymous => {
+                        let token = AnonymousIdentityToken {
+                            policy_id: policy.policy_id.clone(),
+                        };
+                        Ok(ExtensionObject::from_encodable(ObjectId::AnonymousIdentityToken_Encoding_DefaultBinary, &token))
+                    }
+                    client::IdentityToken::UserName(ref user, ref pass) => {
+                        let secure_channel = trace_read_lock_unwrap!(self.secure_channel);
+                        let token = self.make_user_name_identity_token(&secure_channel, policy, user, pass)?;
+                        Ok(ExtensionObject::from_encodable(ObjectId::UserNameIdentityToken_Encoding_DefaultBinary, &token))
+                    }
+                    client::IdentityToken::X509(_, _) => {
+                        // TODO
+                        unimplemented!();
+                    }
                 }
             }
         }
+    }
+
+
+    /// Create a filled in UserNameIdentityToken by using the endpoint's token policy, the current
+    /// secure channel information and the user name and password.
+    fn make_user_name_identity_token(&self, secure_channel: &SecureChannel, user_token_policy: &UserTokenPolicy, user: &str, pass: &str) -> Result<UserNameIdentityToken, StatusCode> {
+        let channel_security_policy = secure_channel.security_policy();
+        let nonce = secure_channel.remote_nonce();
+        let cert = secure_channel.remote_cert();
+        make_user_name_identity_token(channel_security_policy, user_token_policy, nonce, cert, user, pass)
     }
 
     /// Construct a request header for the session. All requests after create session are expected
@@ -1597,7 +2300,7 @@ impl Session {
                 }
             }
             _ => {
-                panic!("Should not be handling non publish responses from here")
+                info!("Unhandled response")
             }
         }
 

@@ -49,13 +49,12 @@ impl BinaryEncoder<ByteString> for ByteString {
         } else if len < -1 {
             error!("ByteString buf length is a negative number {}", len);
             Err(StatusCode::BadDecodingError)
-        } else if len as u32 > decoding_limits.max_byte_string_length {
+        } else if len as usize > decoding_limits.max_byte_string_length {
             error!("ByteString length {} exceeds decoding limit {}", len, decoding_limits.max_string_length);
             Err(StatusCode::BadDecodingError)
         } else {
             // Create a buffer filled with zeroes and read the byte string over the top
-            let mut buf: Vec<u8> = Vec::with_capacity(len as usize);
-            buf.resize(len as usize, 0u8);
+            let mut buf: Vec<u8> = vec![0u8; len as usize];
             process_decode_io_result(stream.read_exact(&mut buf))?;
             Ok(ByteString {
                 value: Some(buf)

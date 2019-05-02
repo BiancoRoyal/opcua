@@ -42,10 +42,10 @@ fn add_example_variables(server: &mut Server) {
 
         // Add some variables to our sample folder. Values will be overwritten by the timer
         let _ = address_space.add_variables(
-            vec![Variable::new(&v1_node, "v1", "v1", "v1 variable", 0 as i32),
-                 Variable::new(&v2_node, "v2", "v2", "v2 variable", false),
-                 Variable::new(&v3_node, "v3", "v3", "v3 variable", UAString::from("")),
-                 Variable::new(&v4_node, "v4", "v4", "v4 variable", 0f64)],
+            vec![Variable::new(&v1_node, "v1", "v1", 0 as i32),
+                 Variable::new(&v2_node, "v2", "v2", false),
+                 Variable::new(&v3_node, "v3", "v3", UAString::from("")),
+                 Variable::new(&v4_node, "v4", "v4", 0f64)],
             &sample_folder_id);
     }
 
@@ -61,7 +61,7 @@ fn add_example_variables(server: &mut Server) {
         if let Some(ref mut v) = address_space.find_variable_mut(v3_node.clone()) {
             // Hello world's counter will increment with each get - slower interval == slower increment
             let mut counter = 0;
-            let getter = AttrFnGetter::new(move |_, _| -> Result<Option<DataValue>, StatusCode> {
+            let getter = AttrFnGetter::new(move |_, _, _| -> Result<Option<DataValue>, StatusCode> {
                 counter += 1;
                 Ok(Some(DataValue::new(UAString::from(format!("Hello World times {}", counter)))))
             });
@@ -73,7 +73,7 @@ fn add_example_variables(server: &mut Server) {
             use std::f64::consts;
             use chrono::Utc;
             let start_time = Utc::now();
-            let getter = AttrFnGetter::new(move |_: NodeId, _: AttributeId| -> Result<Option<DataValue>, StatusCode> {
+            let getter = AttrFnGetter::new(move |_, _, _| -> Result<Option<DataValue>, StatusCode> {
                 let elapsed = Utc::now().signed_duration_since(start_time).num_milliseconds();
                 let moment = (elapsed % 10000) as f64 / 10000.0;
                 Ok(Some(DataValue::new((2.0 * consts::PI * moment).sin())))

@@ -9,7 +9,7 @@ use crate::{client::*, config::*};
 ///
 /// # Example
 ///
-/// ```rust,no_run
+/// ```no_run
 /// use opcua_client::prelude::*;
 ///
 /// fn main() {
@@ -40,12 +40,18 @@ pub struct ClientBuilder {
     config: ClientConfig,
 }
 
-impl ClientBuilder {
-    /// Creates a `ClientBuilder`
-    pub fn new() -> ClientBuilder {
+impl Default for ClientBuilder {
+    fn default() -> Self {
         ClientBuilder {
             config: ClientConfig::default()
         }
+    }
+}
+
+impl ClientBuilder {
+    /// Creates a `ClientBuilder`
+    pub fn new() -> ClientBuilder {
+        ClientBuilder::default()
     }
 
     /// Creates a `ClientBuilder` using a configuration file as the initial state.
@@ -171,4 +177,45 @@ impl ClientBuilder {
         self.config.session_retry_interval = session_retry_interval;
         self
     }
+
+    /// Sets the session timeout period
+    pub fn session_timeout(mut self, session_timeout: u32) -> Self {
+        self.config.session_timeout = session_timeout;
+        self
+    }
+}
+
+#[test]
+fn client_builder() {
+    use std::str::FromStr;
+
+    // The builder should produce a config that reflects the values that are explicitly set upon it.
+    let b = ClientBuilder::new()
+        .application_name("appname")
+        .application_uri("http://appname")
+        .trust_server_certs(true)
+        .create_sample_keypair(true)
+        .product_uri("http://product")
+        .pki_dir("pkixyz")
+        .preferred_locales(vec!["a".to_string(), "b".to_string(), "c".to_string()])
+        .default_endpoint("http://default")
+        .session_retry_interval(1234)
+        .session_retry_limit(999)
+        .session_timeout(777)
+        // TODO user tokens, endpoints
+        ;
+
+    let c = b.config();
+
+    assert_eq!(c.application_name, "appname");
+    assert_eq!(c.application_uri, "http://appname");
+    assert_eq!(c.trust_server_certs, true);
+    assert_eq!(c.create_sample_keypair, true);
+    assert_eq!(c.product_uri, "http://product");
+    assert_eq!(c.pki_dir, PathBuf::from_str("pkixyz").unwrap());
+    assert_eq!(c.preferred_locales, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    assert_eq!(c.default_endpoint, "http://default");
+    assert_eq!(c.session_retry_interval, 1234);
+    assert_eq!(c.session_retry_limit, 999);
+    assert_eq!(c.session_timeout, 777);
 }

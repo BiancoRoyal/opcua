@@ -42,7 +42,7 @@ impl SubscriptionState {
         if self.subscriptions.is_empty() {
             None
         } else {
-            Some(self.subscriptions.keys().map(|k| *k).collect())
+            Some(self.subscriptions.keys().cloned().collect())
         }
     }
 
@@ -101,6 +101,12 @@ impl SubscriptionState {
     pub(crate) fn delete_monitored_items(&mut self, subscription_id: u32, items_to_delete: &[u32]) {
         if let Some(ref mut subscription) = self.subscriptions.get_mut(&subscription_id) {
             subscription.delete_monitored_items(items_to_delete);
+        }
+    }
+
+    pub(crate) fn set_triggering(&mut self, subscription_id: u32, triggering_item_id: u32, links_to_add: &[u32], links_to_remove: &[u32]) {
+        if let Some(ref mut subscription) = self.subscriptions.get_mut(&subscription_id) {
+            subscription.set_triggering(triggering_item_id, links_to_add, links_to_remove);
         }
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "opcua-server"
-version = "0.6.0" # OPCUARustVersion
+version = "0.7.0" # OPCUARustVersion
 description = "OPC UA server API"
 authors = ["Adam Lock <locka99@gmail.com>"]
 homepage = "https://github.com/locka99/opcua"
@@ -12,8 +12,13 @@ documentation = "https://docs.rs/opcua-server/"
 edition = "2018"
 
 [features]
-default = []
+default = ["generated-address-space"]
+# Populates the address space with the default node set. This is something that embedded systems may or may not require.
+generated-address-space = []
+# Servers might want to show a web server with metric / diagnostic info
 http = ["actix-web"]
+# OpenSSL can be compiled and statically linked to with this feature
+vendored-openssl = ["opcua-core/vendored-openssl", "opcua-client/vendored-openssl"]
 
 [dependencies]
 log = "0.4"
@@ -30,6 +35,14 @@ tokio-codec = "0.1"
 tokio-timer = "0.2"
 futures = "0.1"
 bitflags = "1.0"
+derivative = "1.0"
+
+[dev-dependencies]
+criterion = "0.2"
+
+[[bench]]
+name = "address_space"
+harness = false
 
 [dependencies.actix-web]
 version = "0.7"
@@ -37,16 +50,16 @@ optional = true
 
 [dependencies.opcua-types]
 path = "../types"
-version = "0.6.0" # OPCUARustVersion
+version = "0.7.0" # OPCUARustVersion
 
 [dependencies.opcua-core]
 path = "../core"
-version = "0.6.0" # OPCUARustVersion
+version = "0.7.0" # OPCUARustVersion
 
 [dependencies.opcua-client]
 path = "../client"
-version = "0.6.0" # OPCUARustVersion
+version = "0.7.0" # OPCUARustVersion
 
 [dev-dependencies.opcua-console-logging]
 path = "../console-logging"
-version = "0.6.0" # OPCUARustVersion
+version = "0.7.0" # OPCUARustVersion

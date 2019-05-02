@@ -1,53 +1,11 @@
 //! Provides diagnostics structures and functions for gathering information about the running
 //! state of a server.
-use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
-
 use opcua_client::prelude::ServerDiagnosticsSummaryDataType;
 
 use crate::{
     subscriptions::subscription::Subscription,
     session::Session,
 };
-
-pub struct Runtime {
-    /// This is a list of the currently running components / threads / tasks in the server,
-    /// useful for debugging.
-    running_components: Arc<Mutex<BTreeSet<String>>>,
-}
-
-impl Default for Runtime {
-    fn default() -> Self {
-        Self {
-            running_components: Arc::new(Mutex::new(BTreeSet::new())),
-        }
-    }
-}
-
-impl Runtime {
-    pub fn components(&self) -> Vec<String> {
-        let running_components = trace_lock_unwrap!(self.running_components);
-        running_components.iter().map(|k| k.clone()).collect()
-    }
-
-    pub fn register_component<T>(&self, name: T) where T: Into<String> {
-        let mut running_components = trace_lock_unwrap!(self.running_components);
-        let key = name.into();
-        if running_components.contains(&key) {
-            error!("Shouldn't be registering component {} more than once", key);
-        }
-        running_components.insert(key);
-    }
-
-    pub fn deregister_component<T>(&self, name: T) where T: Into<String> {
-        let mut running_components = trace_lock_unwrap!(self.running_components);
-        let key = name.into();
-        if !running_components.contains(&key) {
-            error!("Shouldn't be deregistering component {} which doesn't exist", key);
-        }
-        running_components.remove(&key);
-    }
-}
 
 /// Structure that captures diagnostics information for the server
 #[derive(Clone, Serialize, Debug)]
@@ -83,60 +41,61 @@ impl ServerDiagnostics {
     /// Increment the number of requests that were rejected due to security constraints since the server was
     /// started (or restarted). The requests include all Services defined in Part 4, also requests
     /// to create sessions.
-    pub fn on_rejected_security_session(&mut self) {
+    pub(crate) fn on_rejected_security_session(&mut self) {
         self.server_diagnostics_summary.security_rejected_session_count += 1;
     }
 
     /// Increment the number of requests that were rejected since the server was started (or restarted). The
     /// requests include all Services defined in Part 4, also requests to create sessions. This
     /// number includes the securityRejectedRequestsCount.
-    pub fn on_rejected_session(&mut self) {
+    pub(crate) fn on_rejected_session(&mut self) {
         self.server_diagnostics_summary.rejected_session_count += 1;
     }
 
     /// Increment the number of client sessions currently established in the server.
-    pub fn on_create_session(&mut self, _session: &Session) {
+    pub(crate) fn on_create_session(&mut self, _session: &Session) {
         self.server_diagnostics_summary.current_session_count += 1;
         self.server_diagnostics_summary.cumulated_session_count += 1;
     }
 
     /// Decrement the number of client sessions currently established in the server.
-    pub fn on_destroy_session(&mut self, _session: &Session) {
+    pub(crate) fn on_destroy_session(&mut self, _session: &Session) {
         self.server_diagnostics_summary.current_session_count -= 1;
     }
 
     /// Increment the number of subscriptions currently established in the server.
-    pub fn on_create_subscription(&mut self, _subscription: &Subscription) {
+    pub(crate) fn on_create_subscription(&mut self, _subscription: &Subscription) {
         self.server_diagnostics_summary.current_subscription_count += 1;
         self.server_diagnostics_summary.cumulated_subscription_count += 1;
     }
 
     /// Decrement the number of subscriptions currently established in the server.
-    pub fn on_destroy_subscription(&mut self, _subscription: &Subscription) {
+    pub(crate) fn on_destroy_subscription(&mut self, _subscription: &Subscription) {
         self.server_diagnostics_summary.current_subscription_count -= 1;
     }
 
     /// Increment the number of client sessions that were closed due to timeout since the server was started (or restarted).
-    pub fn on_session_timeout(&mut self) {
+    pub(crate) fn on_session_timeout(&mut self) {
         self.server_diagnostics_summary.session_timeout_count += 1;
     }
 
     // --- These are not yet called by anything
 
+    /*
     /// Increment the number of server-created views in the server.
-    pub fn on_server_view(&mut self, _session: &Session) {
+    pub(crate) fn on_server_view(&mut self, _session: &Session) {
         self.server_diagnostics_summary.server_view_count += 1;
         unimplemented!();
     }
 
     /// Increment the number of client sessions that were closed due to errors since the server was started (or restarted).
-    pub fn on_session_abort(&mut self, _session: &Session) {
+    pub(crate) fn on_session_abort(&mut self, _session: &Session) {
         self.server_diagnostics_summary.session_abort_count += 1;
         unimplemented!()
     }
 
     /// Increment the number of publishing intervals currently supported in the server.
-    pub fn on_publishing_interval(&mut self) {
+    pub(crate) fn on_publishing_interval(&mut self) {
         self.server_diagnostics_summary.publishing_interval_count += 1;
         unimplemented!()
     }
@@ -152,9 +111,10 @@ impl ServerDiagnostics {
     /// Increment the number of requests that were rejected since the server was started (or restarted). The
     /// requests include all Services defined in Part 4, also requests to create sessions. This
     /// number includes the securityRejectedRequestsCount.
-    pub fn on_rejected_request(&mut self) {
+    pub(crate) fn on_rejected_request(&mut self) {
         self.server_diagnostics_summary.rejected_requests_count += 1;
         unimplemented!()
     }
+    */
 }
 

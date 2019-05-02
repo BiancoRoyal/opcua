@@ -2,6 +2,10 @@
 //! trust between a client and server via certificate exchange and validation. It also used for
 //! encrypting / decrypting messages and signing messages.
 
+use opcua_types::{UAString, ByteString};
+use opcua_types::service_types::SignatureData;
+use opcua_types::status_code::StatusCode;
+
 pub mod x509;
 pub mod aeskey;
 pub mod pkey;
@@ -9,6 +13,7 @@ pub mod thumbprint;
 pub mod certificate_store;
 pub mod hash;
 pub mod security_policy;
+pub mod user_identity;
 
 pub use self::x509::*;
 pub use self::aeskey::*;
@@ -17,10 +22,7 @@ pub use self::thumbprint::*;
 pub use self::certificate_store::*;
 pub use self::hash::*;
 pub use self::security_policy::*;
-
-use opcua_types::{UAString, ByteString};
-use opcua_types::service_types::SignatureData;
-use opcua_types::status_code::StatusCode;
+pub use self::user_identity::*;
 
 // Size of a SHA1 hash value in bytes
 pub const SHA1_SIZE: usize = 20;
@@ -103,11 +105,11 @@ pub fn create_signature_data(signing_key: &PrivateKey, security_policy: Security
 
 /// Verifies that the supplied signature data was produced by the signing cert. The contained cert and nonce are supplied so
 /// the signature can be verified against the expected data.
-pub fn verify_signature_data(signature: &SignatureData, security_policy: SecurityPolicy, signing_cert: &X509, contained_cert: &X509, contained_nonce: &ByteString) -> StatusCode {
+pub fn verify_signature_data(signature: &SignatureData, security_policy: SecurityPolicy, signing_cert: &X509, contained_cert: &X509, contained_nonce: &[u8]) -> StatusCode {
     if let Ok(verification_key) = signing_cert.public_key() {
         // This is the data that the should have been signed
         let contained_cert = contained_cert.as_byte_string();
-        let data = concat_data_and_nonce(contained_cert.as_ref(), contained_nonce.as_ref());
+        let data = concat_data_and_nonce(contained_cert.as_ref(), contained_nonce);
 
         // Verify the signature
         let result = security_policy.asymmetric_verify_signature(&verification_key, &data, signature.signature.as_ref(), None);

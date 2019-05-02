@@ -18,7 +18,9 @@ use crate::{
 /// The session service. Allows the client to create, activate and close an authenticated session with the server.
 pub(crate) struct SessionService;
 
-impl Service for SessionService {}
+impl Service for SessionService {
+    fn name(&self) -> String { String::from("SessionService") }
+}
 
 impl SessionService {
     pub fn new() -> SessionService {
@@ -56,11 +58,7 @@ impl SessionService {
             let endpoints = endpoints.unwrap();
 
             // Extract the client certificate if one is supplied
-            let client_certificate = if let Ok(client_certificate) = crypto::X509::from_byte_string(&request.client_certificate) {
-                Some(client_certificate)
-            } else {
-                None
-            };
+            let client_certificate = crypto::X509::from_byte_string(&request.client_certificate).ok();
 
             // Check the client's certificate for validity and acceptance
             let security_policy = {
@@ -87,8 +85,12 @@ impl SessionService {
             let response = if service_result.is_bad() {
                 self.service_fault(&request.request_header, service_result)
             } else {
-                let authentication_token = NodeId::new(0, ByteString::random(32));
-                let session_timeout = constants::SESSION_TIMEOUT;
+                let session_timeout = if request.requested_session_timeout > constants::MAX_SESSION_TIMEOUT {
+                    constants::MAX_SESSION_TIMEOUT
+                } else {
+                    request.requested_session_timeout
+                };
+
                 let max_request_message_size = constants::MAX_REQUEST_MESSAGE_SIZE;
 
                 // Calculate a signature (assuming there is a pkey)
@@ -97,8 +99,7 @@ impl SessionService {
                 } else {
                     SignatureData::null()
                 };
-
-                // Crypto
+                let authentication_token = NodeId::new(0, ByteString::random(32));
                 let server_nonce = security_policy.random_nonce();
                 let server_certificate = server_state.server_certificate_as_byte_string();
                 let server_endpoints = Some(endpoints);
@@ -153,15 +154,18 @@ impl SessionService {
             StatusCode::Good
         };
 
-        // Authenticate the user identity token
         if service_result.is_good() {
-            service_result = server_state.authenticate_endpoint(endpoint_url, security_policy, security_mode, &request.user_identity_token);
+            if let Err(err) = server_state.authenticate_endpoint(endpoint_url, security_policy, security_mode, &request.user_identity_token, &session.session_nonce) {
+                service_result = err;
+            }
         }
 
+        // Authenticate the user identity token
         let response = if service_result.is_good() {
             session.activated = true;
             session.session_nonce = server_nonce;
             let diagnostic_infos = None;
+
             ActivateSessionResponse {
                 response_header: ResponseHeader::new_good(&request.request_header),
                 server_nonce: session.session_nonce.clone(),
@@ -202,7 +206,7 @@ impl SessionService {
                     let secure_channel = trace_read_lock_unwrap!(session.secure_channel);
                     secure_channel.security_policy()
                 };
-                crypto::verify_signature_data(client_signature, security_policy, client_certificate, server_certificate, &session.session_nonce)
+                crypto::verify_signature_data(client_signature, security_policy, client_certificate, server_certificate, &session.session_nonce.as_ref())
             } else {
                 error!("Client signature verification failed, server has no server certificate");
                 StatusCode::BadUnexpectedError

@@ -1,26 +1,48 @@
 # Changelog
 
-ASPIRATIONAL - a short list of things that would be nice to implement in the future
+Planned future work is listed at the bottom.
 
-  - Replace more OpenSSL with `ring` equivalent functions. Ring doesn't do X509 so code is still
-    dependent on OpenSSL until a drop-in replacement appears - need something which can generate, read and write X509
-    certs, private keys and their corresponding .der, .pem file formats.
-  - Tokio codec - use a codec and frame writer to write message chunks
-  - Tokio/Futures/`async`/`await` - Rust 2018 will gain new async functionality soon and at some point the code will have to update
-    to use it.
+## Known issues
 
-## 0.6 (work in progress)
+  - Integration tests are broken and need to be fixed
+  - Subscriptions / monitored items generates spurious errors on some clients
+
+## 0.7 (in progress)
+  - Address space nodes have been made more memory efficient, saving about 3MB of runtime space with
+    the standard node set.
+  - Client and server side support for encrypted passwords in user name identity tokens.
+  - TODO address space. Add a create on demand callback
+  - TODO gen_types.js. Refactor so it could be used to generate code for any model
+  - TODO support events 
+  - TODO More control over limits on the server - number of subscriptions, monitored items, sessions
+  - TODO X509IdentityToken support 
+  - TODO Integration tests are broken and need to be fixed.
+  - TODO Multiple chunk support in client and server, sending and receiving
+  - TODO Session restore after disconnect in server. The server has to stash sessions that were 
+    abnormally disconnected so the session state can be restored if a new connection provides the token.
+
+## 0.6
   - Rust 2018. All `Cargo.toml` files now contain `edition = "2018"` and the code has been cleaned up to benefit from 
     some of the improvements in the language. e.g. many `extern crate` declarations have been removed. Your own code
     can be Rust 2015 but you must build with Rust 1.31 or later.
-  - Client API has been simplified for ad hoc connections and has more documentation.
-  - Client has code to reconnect and restore subscriptions after a disconnect from a server, i.e. attempt to reconnect 
-    and resume session first and if that fails manually reconstruct the session - subscriptions and monitored items.
-  - New `web-client` code which demonstrates an OPCUA client that serves streaming data over a websocket. Reconnection
-    policy allows number of tries and try interval to be configured.
-  - Fixes for TranslateBrowsePathsToNodeIds 
-  - (WIP) Session restore after disconnect in server. The server has to stash sessions that were abnormally disconnected
-    so the session state can be restored if a new connection provides the token.
+  - Client API has been simplified for ad hoc connections and with better documentation.
+  - Client API will reconnect and restore subscriptions after a disconnect from a server. Reconnection is 
+    controlled by a session retry policy.
+  - Improved subscription & monitored item behaviour in server, e.g. notifications are acknowledged upon
+    receiving a publish request (per spec) instead of later so clients complaining about available
+    notifications they've already acknowledged. 
+  - TranslateBrowsePathsToNodeIds service has been fixed
+  - AddNodes, AddReferences, DeleteNodes and DeleteReferences added to the Node Management service set. Note
+    that the server config / builder must set `clients_can_modify_address_space` to be true or these will return an 
+    error. Only minimal model constraint checking is performed.
+  - RegisterNodes and UnregisterNodes added to View service set. Servers must implement callbacks for these
+    to do anything.
+  - SetTriggering and SetMonitoringMode added to the Monitored Item service set
+  - TransferSubscriptions service is implemented as a stub. Most clients will see the error response and failover
+    to manually reconstructing their subscription state.
+  - New `web-client` sample is a OPCUA client that provides a simple websocket connect/disconnect/subscribe interface that
+    streams notifications to a browser.
+  - Support `vendored-openssl` feature of OpenSSL (see [setup](./docs/setup.md) documentation.
 
 ## 0.5
   - Tokio codec - use a codec and frame reader to read message chunks.
@@ -123,3 +145,22 @@ ASPIRATIONAL - a short list of things that would be nice to implement in the fut
 ## 0.1 initial release 
   - Nano implementation
 
+
+# Future work
+
+## Short term
+  
+
+## Longer term
+  
+ASPIRATIONAL - a short list of things that would be nice to implement in the future
+
+  - Code that generates Option<Vec<Foo>> should probably return Vec<Foo> instead to simplify access to the list
+  - Multiple chunks
+  - User-level permission model, i.e. ability to limit access to address space based on identity
+  - Replace more OpenSSL with `ring` equivalent functions. Ring doesn't do X509 so code is still
+    dependent on OpenSSL until a drop-in replacement appears - need something which can generate, read and write X509
+    certs, private keys and their corresponding .der, .pem file formats.
+  - Tokio codec - use a codec and frame writer to write message chunks
+  - Tokio/Futures/`async`/`await` - Rust 2018 will implement new async functionality over time
+    and this project will reflect best practice.

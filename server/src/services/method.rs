@@ -9,23 +9,24 @@ use crate::{
     services::Service,
     session::Session,
     state::ServerState,
-    constants,
 };
 
 /// The method service. Allows a client to call a method on the server.
 pub(crate) struct MethodService;
 
-impl Service for MethodService {}
+impl Service for MethodService {
+    fn name(&self) -> String { String::from("MethodService") }
+}
 
 impl MethodService {
     pub fn new() -> MethodService {
         MethodService {}
     }
 
-    pub fn call(&self, address_space: &AddressSpace, server_state: &ServerState, session: &mut Session, request: &CallRequest) -> Result<SupportedMessage, StatusCode> {
+    pub fn call(&self, address_space: &mut AddressSpace, server_state: &ServerState, session: &mut Session, request: &CallRequest) -> Result<SupportedMessage, StatusCode> {
         if let Some(ref calls) = request.methods_to_call {
-            if calls.len() >= constants::MAX_METHOD_CALLS {
-                return Ok(self.service_fault(&request.request_header, StatusCode::BadTooManyOperations));
+            if calls.len() >= server_state.max_method_calls() {
+                Ok(self.service_fault(&request.request_header, StatusCode::BadTooManyOperations))
             } else {
                 let results: Vec<CallMethodResult> = calls.iter().map(|request| {
                     trace!("Calling to {:?} on {:?}", request.method_id, request.object_id);
@@ -54,7 +55,7 @@ impl MethodService {
             }
         } else {
             warn!("Call has nothing to do");
-            return Ok(self.service_fault(&request.request_header, StatusCode::BadNothingToDo));
+            Ok(self.service_fault(&request.request_header, StatusCode::BadNothingToDo))
         }
     }
 }

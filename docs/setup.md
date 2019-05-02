@@ -2,6 +2,10 @@ This is the in-depth documentation about the OPC UA implementation in Rust.
 
 # Setup
 
+OPC UA for Rust generally requires the most recent stable version of Rust to compile. 
+The recommendation is to install [rustup](https://rustup.rs/) to manage your toolchain and keep it 
+up to date.
+
 ## Windows
 
 Rust supports two compiler backends - gcc or MSVC. The preferred way to build OPC UA is with gcc and MSYS2 but you can
@@ -13,8 +17,8 @@ MSYS2 is a Unix style build environment for Windows.
 
 1. Install [MSYS2 64-bit](http://www.msys2.org/)
 2. Update all the packages `pacman -Syuu`
-3. `rustup toolchain install stable-x86_64-pc-windows-gnu`
-4. `pacman -S gcc mingw-w64-x86_64-gcc mingw-w64-x86_64-gdb mingw-w64-x86_64-pkg-config openssl openssl-devel pkg-config`
+3. `pacman -S gcc mingw-w64-x86_64-gcc mingw-w64-x86_64-gdb mingw-w64-x86_64-pkg-config openssl openssl-devel pkg-config`
+4. Use rustup to install the `stable-x86_64-pc-windows-gnu` toolchain during setup or by typing `rustup toolchain install stable-x86_64-pc-windows-gnu` from the command line.
 
 You should use the MSYS2/MingW64 Shell. You may have to tweak your .bashrc to ensure that both Rust and 
 MinGW64 binaries are on your `PATH` but once that's done you're good to go. 
@@ -22,199 +26,62 @@ MinGW64 binaries are on your `PATH` but once that's done you're good to go.
 ### Visual Studio
 
 1. Install [Microsoft Visual Studio](https://visualstudio.microsoft.com/). You must install C++ and 64-bit platform support.
-2. `rustup toolchain install stable-x86_64-pc-windows-msvc`
+2. Use rustup to install the `install stable-x86_64-pc-windows-msvc` during setup or by typing `rustup toolchain install stable-x86_64-pc-windows-msvc` from the command line.
 3. Download and install http://slproweb.com/download/Win64OpenSSL-1_1_0i.exe
 4. Set an environment variable `OPENSSL_DIR` to point to the installation location, e.g. `C:\OpenSSL-Win64`
 
 Ensure that `%OPENSSL_DIR%\bin` is on your `PATH`.
 
-Note this is a 64-bit build. I haven't tried creating 32-bit builds but it may work by adjusting 64 to 32 as required.
+Note this is a 64-bit build configuration. 32-bit builds should also work by replacing 64 with 32 as required.
 
 ## Linux
 
 How you do this depends on your dist, either through `apt-get` or `dnf`. 
 
-1. Install latest stable rust, e.g. via `rustup`
-2. Install gcc and OpenSSL development libs & headers, e.g. `sudo apt-get gcc libssl-dev`
+1. Install gcc and OpenSSL development libs & headers, e.g. `sudo apt-get gcc libssl-dev` for Debian based systems.
+2. Use rustup to install the latest stable rust during setup.
 
 Adjust your package names as appropriate for other versions of Linux.
+
+## Vendored OpenSSL
+
+The `openssl` crate can fetch, build and statically link to a copy of OpenSSL without it being in your environment. 
+See the crate's [documentation](https://docs.rs/openssl/0.10.18/openssl/) for further information but essentially
+it has a `vendored` feature that can be set to enable this behaviour.
+
+You need to have a C compiler, Perl and Make installed to enable this feature.
+
+This might be useful in some situations such as cross-compilation so OPC UA for Rust exposes the feature 
+through its own called `vendored-openssl` which is exposed on the `opcua-core`, `opcua-server` and `opcua-client`
+crates. i.e. when you specify `vendored-openssl` while building OPC UA, it will specify `vendored` through
+to the `openssl` crate. 
+
+The `demo-server` demonstrates how to use it:
+
+```
+cd samples/demo-server
+cargo build "--features=vendored-openssl"
+```
+
+Note that Rust OPC UA is just passing through this feature so refer to the openssl documentation for any issues 
+encountered while using it.
 
 ## Workspace Layout
 
 OPC UA for Rust follows the normal Rust conventions. There is a Cargo.toml per module that you may use to build the module
-and all dependencies. You may also build the entire workspace from the top like so:
+and all dependencies. e.g.
+
+```bash
+cd opcua/samples/demo-server
+cargo build
+```
+
+There is also a workspace Cargo.toml from the root directory. You may also build the entire workspace like so:
 
 ```bash
 cd opcua
 cargo build
 ```
-
-# OPC UA Feature Support  
-
-## OPC UA Binary Transport Protocol
-
-This implementation will implement the `opc.tcp://` binary format. It will **not** implement OPC UA over XML. XML hasn't
-see much adoption so this is no great impediment.
-
-Binary over `https://` might happen at a later time.
-
-## Server
-
-The server shall implement the OPC UA capabilities:
-
-* http://opcfoundation.org/UA-Profile/Server/Behaviour - base server profile
-* http://opcfoundation.org/UA-Profile/Server/EmbeddedUA - embedded UA profile
-
-### Server services
-
-The following services are supported:
-
-* Discovery service set
-  * GetEndpoints
-
-* Attribute service set
-  * Read
-  * Write
-
-* Session service set
-  * CreateSession
-  * ActivateSession
-  * CloseSession
-  * Cancel (stub)
-
-* View service set
-  * Browse
-  * BrowseNext
-  * TranslateBrowsePathsToNodeIds
-
-* MonitoredItem service set
-  * CreateMonitoredItems - Data change filter including dead band filtering. 
-  * ModifyMonitoredItems
-  * DeleteMonitoredItems
-  * SetMonitoringMode
-
-* Subscription service set
-  * CreateSubscription
-  * ModifySubscription
-  * DeleteSubscriptions
-  * TransferSubscriptions (stub)
-  * Publish
-  * Republish
-  * SetPublishingMode
-    
-* Method service set
-  * Call
-
-Other service calls are unsupported. Calling an unsupported service will terminate the session. 
-
-### Address Space / Nodeset
-
-The standard OPC UA address space is exposed. OPC UA for Rust uses a script to generate code to create and
-populate the standard address space. 
-
-### Current limitations
-
-Currently the following are not supported
-
-* Diagnostic info. OPC UA allows for you to ask for diagnostics with any request. None is supplied at this time
-* Session resumption. If your client disconnects, all information is discarded. 
-* Default nodeset is mostly static. Certain fields of server information will contain their default values unless explicitly set.
-
-## Client
-
-The client is mostly synchronous - i.e. you call a function and wait for the response. Under the covers, the call is 
-sent asynchronously and the call waits a period of time for the response to appear.
-
-The only exception at present is for publish responses for monitored items which arrive asynchronously via the
-callback.
-
-The client has an API that corresponds to the current server supported profile, i.e. look above at the
-server services and there will be calls analogous to these for the client. Potentially the client could
-support other services so it could be used to call other OPC UA implementation. 
-
-In addition to the server services above, the following are also supported.
-
-* FindServers - when connected to a discovery server and find other servers  
-* RegisterServer - when connected to a discovery server, to register a server
-
-## Configuration
-
-Server and client can be configured programmatically or by configuration file. See the `samples/` folder for examples
-of client and server side configuration. The config files are specified in YAML.
-
-## Encryption modes
-
-Server and client support endpoints with the standard message security modes - None, Sign, SignAndEncrypt.
-
-The following security policies are supported - None, Basic128Rsa15, Basic256, Basic256Rsa256.
-
-## User identities
-
-The server and client support the following user identities
-
-1. Anonymous/None, i.e. no authentication
-2. User/password - plaintext password only
-
-User/pass identities are defined by configuration
-
-## Crypto
-
-OPC UA for Rust uses cryptographic algorithms for signing, verifying, encrypting and decrypting data. In addition
-it creates, loads and saves certificates and keys.
-
-OpenSSL is used for this purpose although it would be nice to go to a pure Rust implementation assuming a crate
-delivers everything required. Most of the crypto+OpenSSL code is abstracted to make it easier to remove in the future.
-
-You are advised to read setup and the Rust OpenSSL [documentation](https://github.com/sfackler/rust-openssl) to set up your 
-environment. But basically you need binaries, headers and libs available for the Rust crate to compile against it.
-
-Note: It should be possible to build using MSVC and link to a OpenSSL binary lib but you should read the Rust OpenSSL 
-docs for how to set up your paths properly.
-
-### Certificate pki structure
-
-The server / client uses the following directory structure to manage trusted/rejected certificates:
-
-```
-pki/
-  own/
-    cert.der - your server/client's public certificate
-  private/
-    key.pem  - your server/client's private key
-  trusted/
-    ...      - contains certs from client/servers you've connected with and you trust
-  rejected/
-    ...      - contains certs from client/servers you've connected with and you don't trust
-```
-
-For encrypted connections the following applies:
-
-* The server will reject the first connection from an unrecognized client. It will create a file representing 
-the cert in its the `pki/rejected/` folder and you, the administrator must move the cert to the `trusted/` folder
-to permit connections from that client in future.
-* Likewise, the client shall reject unrecognized servers in the same fashion, and the cert must be moved from the 
-`rejected/` to `trusted/` folder for connection to succeed.
-* Servers that register with a discovery server may find the discovery server rejects their registration attempts if the
-cert is unrecognized. In that case you must move your server's cert from discovery server's  `rejected` to its
-``trusted` folder, wherever that may be. e.g. on Windows it is under `C:\ProgramData\OPC Foundation\UA\Discovery\pki`
-
-### Certificate creator tool
-
-The `tools/certificate-creator` tool will create a demo public self-signed cert and private key. 
-It can be built from source, or the crate:
-
-```bash
-cargo install --force opcua-certificate-creator
-```
-
-A minimal usage might be something like this inside samples/simple-client and/or samples/simple-server:
-
-```bash
- opcua-certificate-creator --pkipath ./pki
-```
-
-A full list of arguments can be obtained by ```--help``` and you are advised to set fields such
-as expiration length, description, country code etc to your requirements.
 
 # Design details
 
@@ -445,57 +312,4 @@ To use them:
 
 # Testing
 
-The plan is for unit tests for at least the following
-
-* All data types, request and response types will be covered by a serialization
-* Chunking messages together, handling errors, buffer limits, multiple chunks
-* Limit validation on string, array fields which have size limits
-* OpenSecureChannel, CloseSecureChannel request and response
-* Service calls
-* Sign, verify, encrypt and decrypt (when implemented)
-* Data change filters
-* Subscription state engine
-* Encryption
-
-## Integration testing
-
-Integration testing shall wait for client and server to be complete. At that point it shall be possible to write a unit test that initiates a connection from a client to a server and simulates scenarios such as.
-
-* Discovery service
-* Connect / disconnect
-* Create session
-* Subscribe to values
-* Encryption
-
-## OPC UA test cases
-
-See this [OPC UA link](http://opcfoundation-onlineapplications.org/ProfileReporting/index.htm) and click
-on the test case links associated with facets.
-
-There are a lot of tests. Any that can be sanely automated or covered by unit / integration tests will be. 
-The project will not be a slave to these tests, but it will try to ensure compatibility.
-
-## 3rd party testing
-
-The best way to test is to build the sample-server and use a 3rd party client to connect to it. 
-
-If you have NodeJS then the easiest 3rd party client to get going with is node-opcua opc-commander client. 
-
-```bash
-npm install -g opcua-commander
-```
-
-Then build and run the sample server:
-
-```bash
-cd sample-server
-cargo run
-```
-
-And in another shell
-
-```bash
-opcua-commander -e opc.tcp://localhost:4855
-```
-
-
+See the [testing](./testing.md) document.

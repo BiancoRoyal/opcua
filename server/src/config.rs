@@ -26,8 +26,14 @@ pub struct TcpConfig {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct ServerUserToken {
+    /// User name
     pub user: String,
+    /// Password
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pass: Option<String>,
+    // X509 file path
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x509: Option<PathBuf>,
 }
 
 impl ServerUserToken {
@@ -35,6 +41,7 @@ impl ServerUserToken {
         ServerUserToken {
             user: user.into(),
             pass: Some(pass.into()),
+            x509: None,
         }
     }
 
@@ -47,6 +54,16 @@ impl ServerUserToken {
         if self.user.is_empty() {
             error!("User token {} has an empty user name", id);
             valid = false;
+        }
+        if self.pass.is_some() && self.x509.is_some() {
+            error!("User token {} has a password and a path to an x509 cert", id);
+            valid = false;
+        }
+        if let Some(ref path) = self.x509 {
+            if !path.exists() || !path.is_file() {
+                error!("User token {} x509 cert does not exist", id);
+                valid = false;
+            }
         }
         valid
     }
@@ -62,6 +79,8 @@ pub struct ServerEndpoint {
     pub security_mode: String,
     /// Security level, higher being more secure
     pub security_level: u8,
+    /// Password security policy when a client supplies a user name identity token
+    pub password_security_policy: Option<String>,
     /// User tokens
     pub user_token_ids: BTreeSet<String>,
 }
@@ -74,6 +93,7 @@ impl<'a> From<(&'a str, SecurityPolicy, MessageSecurityMode, &'a [&'a str])> for
             security_policy: v.1.to_string(),
             security_mode: v.2.to_string(),
             security_level: Self::security_level(v.1),
+            password_security_policy: None,
             user_token_ids: v.3.iter().map(|id| id.to_string()).collect(),
         }
     }
@@ -86,6 +106,7 @@ impl ServerEndpoint {
             security_policy: security_policy.to_string(),
             security_mode: security_mode.to_string(),
             security_level: Self::security_level(security_policy),
+            password_security_policy: None,
             user_token_ids: user_token_ids.iter().map(|id| id.clone()).collect(),
         }
     }
@@ -140,6 +161,14 @@ impl ServerEndpoint {
             }
             if !user_tokens.contains_key(id) {
                 error!("Cannot find user token with id {}", id);
+                valid = false;
+            }
+        }
+
+        if let Some(ref password_security_policy) = self.password_security_policy {
+            let password_security_policy = SecurityPolicy::from_str(password_security_policy).unwrap();
+            if password_security_policy == SecurityPolicy::Unknown {
+                error!("Endpoint {} is invalid. Password security policy \"{}\" is invalid. Valid values are None, Basic128Rsa15, Basic256, Basic256Sha256", id, password_security_policy);
                 valid = false;
             }
         }
@@ -210,7 +239,7 @@ pub struct ServerConfig {
     /// User tokens
     pub user_tokens: BTreeMap<String, ServerUserToken>,
     /// discovery endpoint url which may or may not be the same as the service endpoints below.
-    pub discovery_url: String,
+    pub discovery_urls: Vec<String>,
     /// Endpoints supported by the server
     pub endpoints: BTreeMap<String, ServerEndpoint>,
     /// Maximum number of subscriptions in a session
@@ -221,6 +250,10 @@ pub struct ServerConfig {
     pub max_string_length: u32,
     /// Max bytestring length in bytes
     pub max_byte_string_length: u32,
+    /// Indicates if clients are able to modify the address space through the node management service
+    /// set. This is a very broad flag and is likely to require more fine grained per user control
+    /// in a later revision. By default, this value is `false`
+    pub clients_can_modify_address_space: bool,
 }
 
 impl Config for ServerConfig {
@@ -241,15 +274,19 @@ impl Config for ServerConfig {
             }
         }
         if self.max_array_length == 0 {
-            error!("Server configuration is invalid.  Max array length is invalid");
+            error!("Server configuration is invalid. Max array length is invalid");
             valid = false;
         }
         if self.max_string_length == 0 {
-            error!("Server configuration is invalid.  Max string length is invalid");
+            error!("Server configuration is invalid. Max string length is invalid");
             valid = false;
         }
         if self.max_byte_string_length == 0 {
-            error!("Server configuration is invalid.  Max byte string length is invalid");
+            error!("Server configuration is invalid. Max byte string length is invalid");
+            valid = false;
+        }
+        if self.discovery_urls.is_empty() {
+            error!("Server configuration is invalid. Discovery urls not set");
             valid = false;
         }
         valid
@@ -261,7 +298,6 @@ impl Config for ServerConfig {
 
     fn product_uri(&self) -> UAString { UAString::from(self.product_uri.as_ref()) }
 }
-
 
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -280,12 +316,13 @@ impl Default for ServerConfig {
                 hello_timeout: constants::DEFAULT_HELLO_TIMEOUT_SECONDS,
             },
             user_tokens: BTreeMap::new(),
-            discovery_url: String::new(),
+            discovery_urls: Vec::new(),
             endpoints: BTreeMap::new(),
-            max_array_length: opcua_types_constants::MAX_ARRAY_LENGTH,
-            max_string_length: opcua_types_constants::MAX_STRING_LENGTH,
-            max_byte_string_length: opcua_types_constants::MAX_BYTE_STRING_LENGTH,
+            max_array_length: opcua_types_constants::MAX_ARRAY_LENGTH as u32,
+            max_string_length: opcua_types_constants::MAX_STRING_LENGTH as u32,
+            max_byte_string_length: opcua_types_constants::MAX_BYTE_STRING_LENGTH as u32,
             max_subscriptions: constants::DEFAULT_MAX_SUBSCRIPTIONS,
+            clients_can_modify_address_space: false,
         }
     }
 }
@@ -300,7 +337,7 @@ impl ServerConfig {
         let product_uri = format!("urn:{}", application_name);
         let pki_dir = PathBuf::from("./pki");
         let discovery_server_url = Some(constants::DEFAULT_DISCOVERY_SERVER_URL.to_string());
-        let discovery_url = format!("opc.tcp://{}:{}/", host, port);
+        let discovery_urls = vec![format!("opc.tcp://{}:{}/", host, port)];
 
         ServerConfig {
             application_name,
@@ -316,20 +353,21 @@ impl ServerConfig {
                 hello_timeout: constants::DEFAULT_HELLO_TIMEOUT_SECONDS,
             },
             user_tokens,
-            discovery_url,
+            discovery_urls,
             endpoints,
-            max_array_length: opcua_types_constants::MAX_ARRAY_LENGTH,
-            max_string_length: opcua_types_constants::MAX_STRING_LENGTH,
-            max_byte_string_length: opcua_types_constants::MAX_BYTE_STRING_LENGTH,
+            max_array_length: opcua_types_constants::MAX_ARRAY_LENGTH as u32,
+            max_string_length: opcua_types_constants::MAX_STRING_LENGTH as u32,
+            max_byte_string_length: opcua_types_constants::MAX_BYTE_STRING_LENGTH as u32,
             max_subscriptions: constants::DEFAULT_MAX_SUBSCRIPTIONS,
+            clients_can_modify_address_space: false,
         }
     }
 
     pub fn decoding_limits(&self) -> DecodingLimits {
         DecodingLimits {
-            max_string_length: self.max_string_length,
-            max_byte_string_length: self.max_byte_string_length,
-            max_array_length: self.max_array_length,
+            max_string_length: self.max_string_length as usize,
+            max_byte_string_length: self.max_byte_string_length as usize,
+            max_array_length: self.max_array_length as usize,
         }
     }
 
@@ -359,10 +397,6 @@ impl ServerConfig {
                 false
             }
         });
-        if let Some(endpoint) = endpoint {
-            Some(endpoint.1)
-        } else {
-            None
-        }
+        endpoint.map(|endpoint| endpoint.1)
     }
 }

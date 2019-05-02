@@ -18,14 +18,21 @@ pub struct ClientUserToken {
     /// Username
     pub user: String,
     /// Password
-    pub password: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cert_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_key_path: Option<String>,
 }
 
 impl ClientUserToken {
     pub fn new<S, T>(user: S, password: T) -> Self where S: Into<String>, T: Into<String> {
         ClientUserToken {
             user: user.into(),
-            password: password.into(),
+            password: Some(password.into()),
+            cert_path: None,
+            private_key_path: None,
         }
     }
 }
@@ -94,6 +101,8 @@ pub struct ClientConfig {
     pub session_retry_limit: i32,
     /// Retry interval in milliseconds
     pub session_retry_interval: u32,
+    /// Session timeout period in milliseconds
+    pub session_timeout: u32,
 }
 
 impl Config for ClientConfig {
@@ -181,6 +190,7 @@ impl ClientConfig {
             endpoints: BTreeMap::new(),
             session_retry_limit: SessionRetryPolicy::DEFAULT_RETRY_LIMIT as i32,
             session_retry_interval: SessionRetryPolicy::DEFAULT_RETRY_INTERVAL_MS,
+            session_timeout: 0,
         }
     }
 }

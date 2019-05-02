@@ -393,14 +393,10 @@ impl DataChangeFilter {
 }
 
 impl EndpointDescription {
-    /// Finds the policy id for the specified token type in the endpoint, otherwise None
-    pub fn find_policy_id(&self, token_type: UserTokenType) -> Option<UAString> {
-        if let Some(ref tokens) = self.user_identity_tokens {
-            if let Some(token) = tokens.iter().find(|t| t.token_type == token_type) {
-                Some(token.policy_id.clone())
-            } else {
-                None
-            }
+    /// Returns a reference to a policy that matches the supplied token type, otherwise None
+    pub fn find_policy(&self, token_type: UserTokenType) -> Option<&UserTokenPolicy> {
+        if let Some(ref policies) = self.user_identity_tokens {
+            policies.iter().find(|t| t.token_type == token_type)
         } else {
             None
         }
@@ -411,6 +407,15 @@ impl UserNameIdentityToken {
     /// Ensures the token is valid
     pub fn is_valid(&self) -> bool {
         !self.user_name.is_null() && !self.password.is_null()
+    }
+
+    // Get the plaintext password as a string, if possible.
+    pub fn plaintext_password(&self) -> Result<String, StatusCode> {
+        if !self.encryption_algorithm.is_empty() {
+            // Should not be calling this function at all encryption is applied
+            panic!();
+        }
+        String::from_utf8(self.password.as_ref().to_vec()).map_err(|_| StatusCode::BadDecodingError)
     }
 
     /// Authenticates the token against the supplied username and password.
@@ -490,6 +495,12 @@ impl SignatureData {
             algorithm: UAString::null(),
             signature: ByteString::null(),
         }
+    }
+}
+
+impl Into<MonitoredItemCreateRequest> for NodeId {
+    fn into(self) -> MonitoredItemCreateRequest {
+        MonitoredItemCreateRequest::new(self.into(), MonitoringMode::Reporting, MonitoringParameters::default())
     }
 }
 

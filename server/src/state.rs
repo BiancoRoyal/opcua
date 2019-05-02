@@ -1,16 +1,25 @@
 //! Provides server state information, such as status, configuration, running servers and so on.
 
 use std::sync::{Arc, RwLock};
+use std::str::FromStr;
 
 use opcua_core::prelude::*;
-use opcua_types::node_ids::ObjectId;
-use opcua_types::profiles;
-use opcua_types::service_types::{ApplicationDescription, RegisteredServer, ApplicationType, EndpointDescription, UserNameIdentityToken, UserTokenPolicy, UserTokenType, X509IdentityToken};
-use opcua_types::service_types::ServerState as ServerStateType;
-use opcua_types::status_code::StatusCode;
+use opcua_core::crypto::user_identity;
+
+use opcua_types::{
+    node_ids::ObjectId,
+    profiles,
+    service_types::{
+        ApplicationDescription, RegisteredServer, ApplicationType, EndpointDescription,
+        UserNameIdentityToken, UserTokenPolicy, UserTokenType, X509IdentityToken, SignatureData,
+        ServerState as ServerStateType,
+    },
+    status_code::StatusCode,
+};
 
 use crate::config::{ServerConfig, ServerEndpoint};
 use crate::diagnostics::ServerDiagnostics;
+use crate::callbacks::{RegisterNodes, UnregisterNodes};
 
 const TOKEN_POLICY_ANONYMOUS: &str = "anonymous";
 const TOKEN_POLICY_USER_PASS_PLAINTEXT: &str = "userpass_plaintext";
@@ -51,12 +60,23 @@ pub struct ServerState {
     pub max_keep_alive_count: u32,
     /// Maximum lifetime count (3 times as large as max keep alive)
     pub max_lifetime_count: u32,
+    /// Limits on method service
+    pub max_method_calls: usize,
+    /// Limits on node management service
+    pub max_nodes_per_node_management: usize,
+    /// Limits on view service
+    pub max_browse_paths_per_translate: usize,
     //// Current state
     pub state: ServerStateType,
     /// Sets the abort flag that terminates the associated server
     pub abort: bool,
     /// Diagnostic information
     pub diagnostics: Arc<RwLock<ServerDiagnostics>>,
+    /// Callback for register nodes
+    pub(crate) register_nodes_callback: Option<Box<RegisterNodes + Send + Sync>>,
+    /// Callback for unregister nodes
+    pub(crate) unregister_nodes_callback: Option<Box<UnregisterNodes + Send + Sync>>,
+
 }
 
 impl ServerState {
@@ -116,12 +136,26 @@ impl ServerState {
             });
         }
         if !endpoint.user_token_ids.is_empty() {
+            // The endpoint may set a password security policy
+            let password_security_policy = if let Some(ref security_policy) = endpoint.password_security_policy {
+                if let Ok(security_policy) = SecurityPolicy::from_str(security_policy) {
+                    if security_policy != SecurityPolicy::Unknown {
+                        UAString::from(security_policy.to_str())
+                    } else {
+                        UAString::null()
+                    }
+                } else {
+                    UAString::null()
+                }
+            } else {
+                UAString::null()
+            };
             user_identity_tokens.push(UserTokenPolicy {
                 policy_id: UAString::from(TOKEN_POLICY_USER_PASS_PLAINTEXT),
                 token_type: UserTokenType::Username,
                 issued_token_type: UAString::null(),
                 issuer_endpoint_url: UAString::null(),
-                security_policy_uri: UAString::from(SecurityPolicy::None.to_uri()),
+                security_policy_uri: password_security_policy,
             });
         }
 
@@ -164,10 +198,10 @@ impl ServerState {
 
     pub fn discovery_urls(&self) -> Option<Vec<UAString>> {
         let config = trace_read_lock_unwrap!(self.config);
-        if config.discovery_url.is_empty() {
+        if config.discovery_urls.is_empty() {
             None
         } else {
-            Some(vec![UAString::from(config.discovery_url.as_ref())])
+            Some(config.discovery_urls.iter().map(|url| UAString::from(url.as_ref())).collect())
         }
     }
 
@@ -190,6 +224,18 @@ impl ServerState {
     pub fn is_abort(&self) -> bool { self.abort }
 
     pub fn is_running(&self) -> bool { self.state == ServerStateType::Running }
+
+    pub fn max_method_calls(&self) -> usize {
+        self.max_method_calls
+    }
+
+    pub fn max_nodes_per_node_management(&self) -> usize {
+        self.max_nodes_per_node_management
+    }
+
+    pub fn max_browse_paths_per_translate(&self) -> usize {
+        self.max_browse_paths_per_translate
+    }
 
     pub fn server_certificate_as_byte_string(&self) -> ByteString {
         if let Some(ref server_certificate) = self.server_certificate {
@@ -231,110 +277,134 @@ impl ServerState {
     /// It is possible that the endpoint does not exist, or that the token is invalid / unsupported
     /// or that the token cannot be used with the end point. The return codes reflect the responses
     /// that ActivateSession would expect from a service call.
-    pub fn authenticate_endpoint(&self, endpoint_url: &str, security_policy: SecurityPolicy, security_mode: MessageSecurityMode, user_identity_token: &ExtensionObject) -> StatusCode {
+    pub fn authenticate_endpoint(&self, endpoint_url: &str, security_policy: SecurityPolicy, security_mode: MessageSecurityMode, user_identity_token: &ExtensionObject, server_nonce: &ByteString) -> Result<(), StatusCode> {
         // Get security from endpoint url
         let config = trace_read_lock_unwrap!(self.config);
         let decoding_limits = config.decoding_limits();
         if let Some(endpoint) = config.find_endpoint(endpoint_url, security_policy, security_mode) {
             // Now validate the user identity token
-            if user_identity_token.is_null() || user_identity_token.is_empty() {
+            if user_identity_token.is_empty() {
                 // Empty tokens are treated as anonymous
                 Self::authenticate_anonymous_token(endpoint)
-            } else {
+            } else if let Ok(object_id) = user_identity_token.node_id.as_object_id() {
                 // Read the token out from the extension object
-                if let Ok(object_id) = user_identity_token.node_id.as_object_id() {
-                    match object_id {
-                        ObjectId::AnonymousIdentityToken_Encoding_DefaultBinary => {
-                            // Anonymous
-                            Self::authenticate_anonymous_token(endpoint)
-                        }
-                        ObjectId::UserNameIdentityToken_Encoding_DefaultBinary => {
-                            // Username / password
-                            let result = user_identity_token.decode_inner::<UserNameIdentityToken>(&decoding_limits);
-                            if let Ok(token) = result {
-                                self.authenticate_username_identity_token(&config, endpoint, &token)
-                            } else {
-                                // Garbage in the extension object
-                                error!("User name identity token could not be decoded");
-                                StatusCode::BadIdentityTokenInvalid
-                            }
-                        }
-                        ObjectId::X509IdentityToken_Encoding_DefaultBinary => {
-                            // X509 certs could be recognized here
-                            let result = user_identity_token.decode_inner::<X509IdentityToken>(&decoding_limits);
-                            if let Ok(_) = result {
-                                error!("X509 identity token type is not supported");
-                                StatusCode::BadIdentityTokenRejected
-                            } else {
-                                // Garbage in the extension object
-                                error!("X509 identity token could not be decoded");
-                                StatusCode::BadIdentityTokenInvalid
-                            }
-                        }
-                        _ => {
-                            error!("User identity token type {:?} is unrecognized", object_id);
-                            StatusCode::BadIdentityTokenInvalid
+                match object_id {
+                    ObjectId::AnonymousIdentityToken_Encoding_DefaultBinary => {
+                        // Anonymous
+                        Self::authenticate_anonymous_token(endpoint)
+                    }
+                    ObjectId::UserNameIdentityToken_Encoding_DefaultBinary => {
+                        // Username / password
+                        if let Ok(token) = user_identity_token.decode_inner::<UserNameIdentityToken>(&decoding_limits) {
+                            self.authenticate_username_identity_token(&config, endpoint, &token, &self.server_pkey, server_nonce)
+                        } else {
+                            // Garbage in the extension object
+                            error!("User name identity token could not be decoded");
+                            Err(StatusCode::BadIdentityTokenInvalid)
                         }
                     }
-                } else {
-                    error!("Cannot read user identity token");
-                    StatusCode::BadIdentityTokenInvalid
+                    ObjectId::X509IdentityToken_Encoding_DefaultBinary => {
+                        // X509 certs
+                        if let Ok(token) = user_identity_token.decode_inner::<X509IdentityToken>(&decoding_limits) {
+                            // TODO get this from activate session
+                            let user_token_signature = SignatureData {
+                                algorithm: UAString::null(),
+                                signature: ByteString::null()
+                            };
+                            self.authenticate_x509_identity_token(&token, &user_token_signature, &self.server_certificate, server_nonce)
+                        } else {
+                            // Garbage in the extension object
+                            error!("X509 identity token could not be decoded");
+                            Err(StatusCode::BadIdentityTokenInvalid)
+                        }
+                    }
+                    _ => {
+                        error!("User identity token type {:?} is unrecognized", object_id);
+                        Err(StatusCode::BadIdentityTokenInvalid)
+                    }
                 }
+            } else {
+                error!("Cannot read user identity token");
+                Err(StatusCode::BadIdentityTokenInvalid)
             }
         } else {
             error!("Cannot find endpoint that matches path \"{}\", security policy {:?}, and security mode {:?}", endpoint_url, security_policy, security_mode);
-            StatusCode::BadTcpEndpointUrlInvalid
+            Err(StatusCode::BadTcpEndpointUrlInvalid)
         }
+    }
+
+    pub fn set_register_nodes_callbacks(&mut self, register_nodes_callback: Box<RegisterNodes + Send + Sync>, unregister_nodes_callback: Box<UnregisterNodes + Send + Sync>) {
+        self.register_nodes_callback = Some(register_nodes_callback);
+        self.unregister_nodes_callback = Some(unregister_nodes_callback);
     }
 
     /// Authenticates an anonymous token, i.e. does the endpoint support anonymous access or not
-    fn authenticate_anonymous_token(endpoint: &ServerEndpoint) -> StatusCode {
+    fn authenticate_anonymous_token(endpoint: &ServerEndpoint) -> Result<(), StatusCode> {
         if endpoint.supports_anonymous() {
             debug!("Anonymous identity is authenticated");
-            StatusCode::Good
+            Ok(())
         } else {
             error!("Endpoint \"{}\" does not support anonymous authentication", endpoint.path);
-            StatusCode::BadIdentityTokenRejected
+            Err(StatusCode::BadIdentityTokenRejected)
         }
     }
 
+    fn authenticate_x509_identity_token(&self, token: &X509IdentityToken, user_token_signature: &SignatureData, server_certificate: &Option<X509>, server_nonce: &ByteString) -> Result<(), StatusCode> {
+        match server_certificate {
+            Some(ref server_certificate) => {
+                // TODO
+                let security_policy = SecurityPolicy::Basic128Rsa15;
+                user_identity::verify_x509_identity_token(token, user_token_signature, security_policy, server_certificate, server_nonce.as_ref())
+            }
+            None => {
+                Err(StatusCode::BadIdentityTokenInvalid)
+            }
+        }
+    }
+
+
     /// Authenticates the username identity token with the supplied endpoint
-    fn authenticate_username_identity_token(&self, config: &ServerConfig, endpoint: &ServerEndpoint, token: &UserNameIdentityToken) -> StatusCode {
-        // TODO Server's user token policy should be checked here.
+    fn authenticate_username_identity_token(&self, config: &ServerConfig, endpoint: &ServerEndpoint, token: &UserNameIdentityToken, server_key: &Option<PrivateKey>, server_nonce: &ByteString) -> Result<(), StatusCode> {
         // The policy_id should be used to determine the algorithm for encoding passwords etc.
-        if !token.encryption_algorithm.is_null() {
-            // Plaintext is the only supported algorithm at this time
-            error!("Only unencrypted passwords are supported, {:?}", token);
-            StatusCode::BadIdentityTokenInvalid
-        } else if token.user_name.is_null() {
+        if token.user_name.is_null() {
             error!("User identify token supplies no user name");
-            StatusCode::BadIdentityTokenInvalid
+            Err(StatusCode::BadIdentityTokenInvalid)
         } else {
+            let token_password = if !token.encryption_algorithm.is_null() {
+                if let Some(ref server_key) = server_key {
+                    user_identity::decrypt_user_identity_token_password(&token, server_nonce.as_ref(), server_key)?
+                } else {
+                    error!("Identity token password is encrypted and no server private key was supplied");
+                    return Err(StatusCode::BadIdentityTokenInvalid);
+                }
+            } else {
+                token.plaintext_password()?
+            };
+
             // Iterate ids in endpoint
             for user_token_id in &endpoint.user_token_ids {
                 if let Some(server_user_token) = config.user_tokens.get(user_token_id) {
                     if &server_user_token.user == token.user_name.as_ref() {
                         // test for empty password
-                        let result = if server_user_token.pass.is_none() {
+                        let valid = if server_user_token.pass.is_none() {
                             // Empty password for user
-                            token.authenticate(&server_user_token.user, b"")
+                            token_password.is_empty()
                         } else {
                             // Password compared as UTF-8 bytes
                             let server_password = server_user_token.pass.as_ref().unwrap().as_bytes();
-                            token.authenticate(&server_user_token.user, server_password)
+                            server_password == token_password.as_bytes()
                         };
-                        let valid = result.is_ok();
                         if !valid {
                             error!("Cannot authenticate \"{}\", password is invalid", server_user_token.user);
-                            return StatusCode::BadIdentityTokenRejected;
+                            return Err(StatusCode::BadIdentityTokenRejected);
                         } else {
-                            return StatusCode::Good;
+                            return Ok(());
                         }
                     }
                 }
             }
             error!("Cannot authenticate \"{}\", user not found for endpoint", token.user_name);
-            StatusCode::BadIdentityTokenRejected
+            Err(StatusCode::BadIdentityTokenRejected)
         }
     }
 }

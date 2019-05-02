@@ -70,21 +70,19 @@ impl CertificateStore {
             let result = certificate_store.read_own_cert_and_pkey();
             if let Ok((cert, pkey)) = result {
                 (Some(cert), Some(pkey))
-            } else {
-                if let Some(application_description) = application_description {
-                    info!("Creating sample application instance certificate and private key");
-                    let result = certificate_store.create_and_store_application_instance_cert(&X509Data::from(application_description), false);
-                    if let Err(err) = result {
-                        error!("Certificate creation failed, error = {}", err);
-                        (None, None)
-                    } else {
-                        let (cert, pkey) = result.unwrap();
-                        (Some(cert), Some(pkey))
-                    }
-                } else {
-                    error!("Application instance certificate and private key could not be read - {}", result.unwrap_err());
+            } else if let Some(application_description) = application_description {
+                info!("Creating sample application instance certificate and private key");
+                let result = certificate_store.create_and_store_application_instance_cert(&X509Data::from(application_description), false);
+                if let Err(err) = result {
+                    error!("Certificate creation failed, error = {}", err);
                     (None, None)
+                } else {
+                    let (cert, pkey) = result.unwrap();
+                    (Some(cert), Some(pkey))
                 }
+            } else {
+                error!("Application instance certificate and private key could not be read - {}", result.unwrap_err());
+                (None, None)
             }
         };
         (certificate_store, cert, pkey)
@@ -171,7 +169,7 @@ impl CertificateStore {
                     }
                     subject_alternative_name.build(&builder.x509v3_context(None, None)).unwrap()
                 };
-                let _ = builder.append_extension(subject_alternative_name).unwrap();
+                builder.append_extension(subject_alternative_name).unwrap();
             }
 
             // Self-sign
@@ -180,7 +178,7 @@ impl CertificateStore {
             builder.build()
         };
 
-        Ok((X509::wrap(cert), PrivateKey::wrap_private_key(pkey)))
+        Ok((X509::from(cert), PrivateKey::wrap_private_key(pkey)))
     }
 
     /// Reads a private key from a path on disk.
@@ -267,12 +265,12 @@ impl CertificateStore {
     /// or the test is assumed to fail.
     fn ensure_cert_and_file_are_the_same(cert: &X509, cert_path: &Path) -> bool {
         if !cert_path.exists() {
-            trace!("Can't find cert on disk");
+            trace!("Cannot find cert on disk");
             false
         } else {
             let cert2 = CertificateStore::read_cert(cert_path);
             if cert2.is_err() {
-                trace!("Can't read cert from disk {:?} - {}", cert_path, cert2.unwrap_err());
+                trace!("Cannot read cert from disk {:?} - {}", cert_path, cert2.unwrap_err());
                 // No cert2 to compare to
                 false
             } else {
@@ -425,15 +423,15 @@ impl CertificateStore {
         use std;
         if path.exists() {
             if !path.is_dir() {
-                return Err(format!("{} is not a directory ", path.display()));
+                Err(format!("{} is not a directory ", path.display()))
+            } else {
+                Ok(())
             }
         } else {
-            let result = std::fs::create_dir_all(path);
-            if result.is_err() {
-                return Err(format!("Cannot make directories for {}", path.display()));
-            }
+            std::fs::create_dir_all(path).map_err(|_| {
+                format!("Cannot make directories for {}", path.display())
+            })
         }
-        Ok(())
     }
 
     /// Get path to application instance certificate
@@ -546,7 +544,7 @@ impl CertificateStore {
             return Err(format!("Could not read cert from cert file {}", path.display()));
         }
 
-        Ok(X509::wrap(cert.unwrap()))
+        Ok(X509::from(cert.unwrap()))
     }
 
     /// Makes a path
@@ -562,7 +560,7 @@ impl CertificateStore {
         Ok(path)
     }
 
-    /// Writes to file or prints an error for the reason why it can't.
+    /// Writes to file or prints an error for the reason why it cannot.
     ///
     /// # Errors
     ///

@@ -2,6 +2,7 @@
 
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
+use std::path::PathBuf;
 
 use opcua_types::{
     MessageSecurityMode,
@@ -10,7 +11,7 @@ use opcua_types::{
     },
     status_code::StatusCode,
     url::{
-        is_opc_ua_binary_url, server_url_from_endpoint_url, url_matches, url_matches_except_host,
+        is_valid_opc_ua_url, is_opc_ua_binary_url, server_url_from_endpoint_url, url_matches, url_matches_except_host,
         hostname_from_url, url_with_replaced_hostname,
     },
 };
@@ -28,12 +29,12 @@ use crate::{
 
 #[derive(Debug)]
 pub enum IdentityToken {
+    /// Anonymous identity token
     Anonymous,
+    /// User name and a password
     UserName(String, String),
-}
-
-struct SessionEntry {
-    session: Arc<RwLock<Session>>,
+    /// X5090 cert - a path to the cert.der, and private.pem
+    X509(PathBuf, PathBuf),
 }
 
 /// The `Client` defines a connection that can be used to to get end points or establish
@@ -56,9 +57,6 @@ struct SessionEntry {
 pub struct Client {
     /// Client configuration
     config: ClientConfig,
-    /// A list of sessions made by the client. They are protected since a session may or may not be
-    /// running on an independent thread.
-    sessions: Vec<SessionEntry>,
     /// Certificate store is where certificates go.
     certificate_store: Arc<RwLock<CertificateStore>>,
     /// The session retry policy for new sessions
@@ -93,7 +91,7 @@ impl Client {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```no_run
     /// use opcua_client::prelude::*;
     /// use std::path::PathBuf;
     ///
@@ -122,20 +120,21 @@ impl Client {
             certificate_store.trust_unknown_certs = true;
         }
 
+        let session_timeout = config.session_timeout as f64;
+
         // The session retry policy dictates how many times to retry if connection to the server goes down
         // and on what interval
         let session_retry_policy = match config.session_retry_limit {
             // Try forever
-            -1 => SessionRetryPolicy::infinity(config.session_retry_interval),
+            -1 => SessionRetryPolicy::infinity(session_timeout, config.session_retry_interval),
             // Never try
-            0 => SessionRetryPolicy::never(),
+            0 => SessionRetryPolicy::never(session_timeout),
             // Try this many times
-            session_retry_limit => SessionRetryPolicy::new(session_retry_limit as u32, config.session_retry_interval)
+            session_retry_limit => SessionRetryPolicy::new(session_timeout, session_retry_limit as u32, config.session_retry_interval)
         };
 
         Client {
             config,
-            sessions: Vec::new(),
             session_retry_policy,
             certificate_store: Arc::new(RwLock::new(certificate_store)),
         }
@@ -166,16 +165,16 @@ impl Client {
         // Ask the server associated with the default endpoint for its list of endpoints
         let endpoints = match self.get_server_endpoints() {
             Result::Err(status_code) => {
-                error!("Can't get endpoints for server, error - {}", status_code);
+                error!("Cannot get endpoints for server, error - {}", status_code);
                 return Err(status_code);
             }
             Result::Ok(endpoints) => endpoints
         };
 
         info!("Server has these endpoints:");
-        endpoints.iter().for_each(|e| println!("  {} - {:?} / {:?}", e.endpoint_url,
-                                               SecurityPolicy::from_str(e.security_policy_uri.as_ref()).unwrap(),
-                                               e.security_mode));
+        endpoints.iter().for_each(|e| info!("  {} - {:?} / {:?}", e.endpoint_url,
+                                            SecurityPolicy::from_str(e.security_policy_uri.as_ref()).unwrap(),
+                                            e.security_mode));
 
         // Create a session to an endpoint. If an endpoint id is specified use that
         let session = if let Some(endpoint_id) = endpoint_id {
@@ -232,7 +231,7 @@ impl Client {
     pub fn default_endpoint(&self) -> Result<ClientEndpoint, String> {
         let default_endpoint_id = self.config.default_endpoint.clone();
         if default_endpoint_id.is_empty() {
-            Err(format!("No default endpoint has been specified"))
+            Err("No default endpoint has been specified".to_string())
         } else if let Some(endpoint) = self.config.endpoints.get(&default_endpoint_id) {
             Ok(endpoint.clone())
         } else {
@@ -293,9 +292,6 @@ impl Client {
             Err(format!("Endpoint url {}, is not a valid / supported url", session_info.endpoint.endpoint_url))
         } else {
             let session = Arc::new(RwLock::new(Session::new(self.application_description(), self.certificate_store.clone(), session_info, self.session_retry_policy.clone())));
-            self.sessions.push(SessionEntry {
-                session: session.clone(),
-            });
             Ok(session)
         }
     }
@@ -335,7 +331,7 @@ impl Client {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```no_run
     /// use opcua_client::prelude::*;
     /// use std::path::PathBuf;
     ///
@@ -368,9 +364,9 @@ impl Client {
             client_certificate,
         };
         let mut session = Session::new(self.application_description(), self.certificate_store.clone(), session_info, self.session_retry_policy.clone());
-        let _ = session.connect()?;
+        session.connect()?;
         let result = session.get_endpoints()?;
-        let _ = session.disconnect();
+        session.disconnect();
         Ok(result)
     }
 
@@ -390,17 +386,14 @@ impl Client {
             let mut session = trace_write_lock_unwrap!(session);
             // Connect & activate the session.
             let connected = session.connect();
-            if let Ok(_) = connected {
+            if connected.is_ok() {
                 // Find me some some servers
-                let servers = session.find_servers(discovery_endpoint_url.clone());
-                let result = if let Ok(servers) = servers {
-                    Ok(servers)
-                } else {
-                    let result = servers.unwrap_err();
-                    error!("Cannot find servers on discovery server {} - check this error - {:?}", discovery_endpoint_url, result);
-                    Err(result)
-                };
-                let _ = session.disconnect();
+                let result = session.find_servers(discovery_endpoint_url.clone())
+                    .map_err(|err| {
+                        error!("Cannot find servers on discovery server {} - check this error - {:?}", discovery_endpoint_url, err);
+                        err
+                    });
+                session.disconnect();
                 result
             } else {
                 let result = connected.unwrap_err();
@@ -431,38 +424,44 @@ impl Client {
                               server: RegisteredServer) -> Result<(), StatusCode>
         where T: Into<String> {
         let discovery_endpoint_url = discovery_endpoint_url.into();
-        // Get a list of endpoints from the discovery server
-        debug!("register_server({}, {:?}", discovery_endpoint_url, server);
-        let endpoints = self.get_server_endpoints_from_url(discovery_endpoint_url.clone())?;
-        if endpoints.is_empty() {
-            Err(StatusCode::BadUnexpectedError)
+        if !is_valid_opc_ua_url(&discovery_endpoint_url) {
+            error!("Discovery endpoint url \"{}\" is not a valid OPC UA url", discovery_endpoint_url);
+            Err(StatusCode::BadTcpEndpointUrlInvalid)
         } else {
-            // Now choose the strongest endpoint to register through
-            if let Some(endpoint) = endpoints.iter()
-                .filter(|e| self.is_supported_endpoint(*e))
-                .max_by(|a, b| a.security_level.cmp(&b.security_level)) {
-                debug!("Registering this server via discovery endpoint {:?}", endpoint);
-                let session = self.new_session_from_info(endpoint.clone());
-                if let Ok(session) = session {
-                    let mut session = trace_write_lock_unwrap!(session);
-                    let connected = session.connect();
-                    if let Ok(_) = connected {
-                        // Register with the server
-                        let result = session.register_server(server);
-                        let _ = session.disconnect();
-                        result
+            // Get a list of endpoints from the discovery server
+            debug!("register_server({}, {:?}", discovery_endpoint_url, server);
+            let endpoints = self.get_server_endpoints_from_url(discovery_endpoint_url.clone())?;
+            if endpoints.is_empty() {
+                Err(StatusCode::BadUnexpectedError)
+            } else {
+                // Now choose the strongest endpoint to register through
+                if let Some(endpoint) = endpoints.iter()
+                    .filter(|e| self.is_supported_endpoint(*e))
+                    .max_by(|a, b| a.security_level.cmp(&b.security_level)) {
+                    debug!("Registering this server via discovery endpoint {:?}", endpoint);
+                    let session = self.new_session_from_info(endpoint.clone());
+                    if let Ok(session) = session {
+                        let mut session = trace_write_lock_unwrap!(session);
+                        match session.connect() {
+                            Ok(_) => {
+                                // Register with the server
+                                let result = session.register_server(server);
+                                session.disconnect();
+                                result
+                            }
+                            Err(result) => {
+                                error!("Cannot connect to {} - check this error - {:?}", discovery_endpoint_url, result);
+                                Err(result)
+                            }
+                        }
                     } else {
-                        let result = connected.unwrap_err();
-                        error!("Cannot connect to {} - check this error - {:?}", discovery_endpoint_url, result);
-                        Err(result)
+                        error!("Cannot create a sesion to {} - check if url is malformed", discovery_endpoint_url);
+                        Err(StatusCode::BadUnexpectedError)
                     }
                 } else {
-                    error!("Cannot create a sesion to {} - check if url is malformed", discovery_endpoint_url);
+                    error!("Cannot find an endpoint that we call register server on");
                     Err(StatusCode::BadUnexpectedError)
                 }
-            } else {
-                error!("Can't find an endpoint that we call register server on");
-                Err(StatusCode::BadUnexpectedError)
             }
         }
     }
@@ -473,7 +472,7 @@ impl Client {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```no_run
     /// use opcua_client::prelude::*;
     /// let endpoints = [
     ///     EndpointDescription::from("opc.tcp://foo:123"),
@@ -502,7 +501,7 @@ impl Client {
             e.security_mode == security_mode &&
                 e.security_policy_uri.as_ref() == security_policy_uri &&
                 url_matches(e.endpoint_url.as_ref(), &endpoint_url)
-        }).map(|e| e.clone());
+        }).cloned();
 
         // If something was found, return it, otherwise try a fuzzier match that ignores the hostname.
         if result.is_some() {
@@ -512,7 +511,7 @@ impl Client {
                 e.security_mode == security_mode &&
                     e.security_policy_uri.as_ref() == security_policy_uri &&
                     url_matches_except_host(e.endpoint_url.as_ref(), &endpoint_url)
-            }).map(|e| e.clone())
+            }).cloned()
         }
     }
 
@@ -535,7 +534,17 @@ impl Client {
         if user_token_id == ANONYMOUS_USER_TOKEN_ID {
             Some(IdentityToken::Anonymous)
         } else if let Some(token) = self.config.user_tokens.get(&user_token_id) {
-            Some(IdentityToken::UserName(token.user.clone(), token.password.clone()))
+            if let Some(ref password) = token.password {
+                Some(IdentityToken::UserName(token.user.clone(), password.clone()))
+            } else if let Some(ref cert_path) = token.cert_path {
+                if let Some(ref private_key_path) = token.private_key_path {
+                    Some(IdentityToken::X509(PathBuf::from(cert_path), PathBuf::from(private_key_path)))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -547,7 +556,7 @@ impl Client {
                                   security_mode: MessageSecurityMode) -> Option<EndpointDescription>
     {
         if security_policy == SecurityPolicy::Unknown {
-            panic!("Can't match against unknown security policy");
+            panic!("Cannot match against unknown security policy");
         }
 
         let matching_endpoint = endpoints.iter().find(|e| {
@@ -555,7 +564,7 @@ impl Client {
             security_mode == e.security_mode &&
                 security_policy == SecurityPolicy::from_uri(e.security_policy_uri.as_ref()) &&
                 url_matches_except_host(endpoint_url, e.endpoint_url.as_ref())
-        }).map(|e| e.clone());
+        }).cloned();
 
         // Issue #16, #17 - the server may advertise an endpoint whose hostname is inaccessible
         // to the client so substitute the advertised hostname with the one the client supplied.

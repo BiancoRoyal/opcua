@@ -15,11 +15,11 @@ pub type EncodingResult<T> = std::result::Result<T, StatusCode>;
 #[derive(Clone, Copy, Debug)]
 pub struct DecodingLimits {
     /// Maximum length in bytes (not chars!) of a string. 0 actually means 0, i.e. no string permitted
-    pub max_string_length: u32,
+    pub max_string_length: usize,
     /// Maximum length in bytes of a byte string. 0 actually means 0, i.e. no byte string permitted
-    pub max_byte_string_length: u32,
+    pub max_byte_string_length: usize,
     /// Maximum number of array elements. 0 actually means 0, i.e. no array permitted
-    pub max_array_length: u32,
+    pub max_array_length: usize,
 }
 
 impl Default for DecodingLimits {
@@ -67,22 +67,18 @@ pub trait BinaryEncoder<T> {
 
 /// Converts an IO encoding error (and logs when in error) into an EncodingResult
 pub fn process_encode_io_result(result: Result<usize>) -> EncodingResult<usize> {
-    if result.is_err() {
-        trace!("Encoding error - {:?}", result.unwrap_err());
-        Err(StatusCode::BadEncodingError)
-    } else {
-        Ok(result.unwrap())
-    }
+    result.map_err(|err| {
+        trace!("Encoding error - {:?}", err);
+        StatusCode::BadEncodingError
+    })
 }
 
 /// Converts an IO encoding error (and logs when in error) into an EncodingResult
 pub fn process_decode_io_result<T>(result: Result<T>) -> EncodingResult<T> where T: Debug {
-    if result.is_err() {
-        trace!("Decoding error - {:?}", result.unwrap_err());
-        Err(StatusCode::BadDecodingError)
-    } else {
-        Ok(result.unwrap())
-    }
+    result.map_err(|err| {
+        trace!("Decoding error - {:?}", err);
+        StatusCode::BadDecodingError
+    })
 }
 
 /// Calculates the length in bytes of an array of encoded type
@@ -116,7 +112,7 @@ pub fn read_array<S: Read, T: BinaryEncoder<T>>(stream: &mut S, decoding_limits:
     } else if len < -1 {
         error!("Array length is negative value and invalid");
         Err(StatusCode::BadDecodingError)
-    } else if len as u32 > decoding_limits.max_array_length {
+    } else if len as usize > decoding_limits.max_array_length {
         error!("Array length {} exceeds decoding limit {}", len, decoding_limits.max_array_length);
         Err(StatusCode::BadDecodingError)
     } else {

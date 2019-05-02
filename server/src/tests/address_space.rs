@@ -107,7 +107,7 @@ fn find_common_nodes() {
 #[test]
 fn object_attributes() {
     let on = NodeId::new(1, "o1");
-    let o = Object::new(&on, "Browse01", "Display01", "xx");
+    let o = Object::new(&on, "Browse01", "Display01", 0);
     assert_eq!(o.node_class(), NodeClass::Object);
     assert_eq!(o.node_id(), on);
     assert_eq!(o.browse_name(), QualifiedName::new(0, "Browse01"));
@@ -135,7 +135,7 @@ fn find_references_from() {
     assert!(references.is_some());
     let references = references.as_ref().unwrap();
     for r in references {
-        println!("Filtered type = {:?}, to = {:?}", r.reference_type_id, r.node_id);
+        println!("Filtered type = {:?}, to = {:?}", r.reference_type_id, r.target_node_id);
     }
     assert_eq!(references.len(), 3);
 
@@ -143,7 +143,7 @@ fn find_references_from() {
     assert!(references.is_some());
     let references = references.as_ref().unwrap();
     for r in references.iter() {
-        println!("Refs from Root type = {:?}, to = {:?}", r.reference_type_id, r.node_id);
+        println!("Refs from Root type = {:?}, to = {:?}", r.reference_type_id, r.target_node_id);
     }
     assert_eq!(references.len(), 4);
 
@@ -151,13 +151,13 @@ fn find_references_from() {
     assert!(references.is_some());
     let references = references.unwrap();
     for r in references.iter() {
-        println!("Refs from Objects type = {:?}, to = {:?}", r.reference_type_id, r.node_id);
+        println!("Refs from Objects type = {:?}, to = {:?}", r.reference_type_id, r.target_node_id);
     }
     assert_eq!(references.len(), 2);
 
     let r1 = &references[0];
-    assert_eq!(r1.reference_type_id, ReferenceTypeId::Organizes);
-    let child_node_id = r1.node_id.clone();
+    assert_eq!(r1.reference_type_id, ReferenceTypeId::Organizes.into());
+    let child_node_id = r1.target_node_id.clone();
 
     let child = address_space.find_node(&child_node_id);
     assert!(child.is_some());
@@ -186,7 +186,7 @@ fn array_as_variable() {
 
     // Get the variable node back from the address space, ensure that the ValueRank and ArrayDimensions are correct
     let node_id = NodeId::new(2, 1);
-    let v = Variable::new(&node_id, "x", "x", &"x value", values);
+    let v = Variable::new(&node_id, "x", "x", values);
 
     let value_rank = v.value_rank();
     assert_eq!(value_rank, 1);
@@ -206,7 +206,7 @@ fn multi_dimension_array_as_variable() {
 
     // Get the variable node back from the address space, ensure that the ValueRank and ArrayDimensions are correct
     let node_id = NodeId::new(2, 1);
-    let v = Variable::new(&node_id, "x", "x", &"x value", mda);
+    let v = Variable::new(&node_id, "x", "x", mda);
 
     let value_rank = v.value_rank();
     assert_eq!(value_rank, 2);
@@ -236,7 +236,7 @@ fn variable_builder() {
         .array_dimensions(&[1, 2, 3])
         .historizing(true)
         .value(Variant::from(999))
-        .minimum_sampling_interval(123)
+        .minimum_sampling_interval(123.0)
         .build();
 
     assert_eq!(v.node_id(), NodeId::new(1, "Hello"));
@@ -247,4 +247,5 @@ fn variable_builder() {
     assert_eq!(v.array_dimensions().unwrap(), vec![1, 2, 3]);
     assert_eq!(v.historizing(), true);
     assert_eq!(v.value().value.unwrap(), Variant::from(999));
+    assert_eq!(v.minimum_sampling_interval().unwrap(), 123.0);
 }

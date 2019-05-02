@@ -75,18 +75,10 @@ impl BinaryEncoder<ExtensionObject> for ExtensionObject {
                 ExtensionObjectEncoding::None
             }
             0x1 => {
-                let value = ByteString::decode(stream, decoding_limits);
-                if value.is_err() {
-                    return Err(value.unwrap_err());
-                }
-                ExtensionObjectEncoding::ByteString(value.unwrap())
+                ExtensionObjectEncoding::ByteString(ByteString::decode(stream, decoding_limits)?)
             }
             0x2 => {
-                let value = XmlElement::decode(stream, decoding_limits);
-                if value.is_err() {
-                    return Err(value.unwrap_err());
-                }
-                ExtensionObjectEncoding::XmlElement(value.unwrap())
+                ExtensionObjectEncoding::XmlElement(XmlElement::decode(stream, decoding_limits)?)
             }
             _ => {
                 error!("Invalid encoding type {} in stream", encoding_type);
@@ -116,7 +108,7 @@ impl ExtensionObject {
 
     /// Tests for empty body.
     pub fn is_empty(&self) -> bool {
-        match self.body {
+        self.is_null() || match self.body {
             ExtensionObjectEncoding::None => true,
             _ => false
         }
@@ -139,13 +131,20 @@ impl ExtensionObject {
     /// for decoding. The caller supplies the binary encoder impl that should be used to extract
     /// the data. Errors result in a decoding error.
     pub fn decode_inner<T>(&self, decoding_limits: &DecodingLimits) -> EncodingResult<T> where T: BinaryEncoder<T> {
-        if let ExtensionObjectEncoding::ByteString(ref byte_string) = self.body {
-            if let Some(ref value) = byte_string.value {
-                let value = value.clone();
-                let mut stream = Cursor::new(value);
-                return T::decode(&mut stream, decoding_limits);
+        match self.body {
+            ExtensionObjectEncoding::ByteString(ref byte_string) => {
+                if let Some(ref value) = byte_string.value {
+                    // let value = value.clone();
+                    let mut stream = Cursor::new(value);
+                    T::decode(&mut stream, decoding_limits)
+                } else {
+                    Err(StatusCode::BadDecodingError)
+                }
+            }
+            _ => {
+                error!("decode_inner called on an unsupported ExtensionObject type");
+                Err(StatusCode::BadDecodingError)
             }
         }
-        Err(StatusCode::BadDecodingError)
     }
 }

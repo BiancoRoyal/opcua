@@ -6,11 +6,8 @@ use std::marker::Sync;
 use std::time::{Instant, Duration};
 use std::thread;
 
-use futures::{Future, Stream};
-use futures::future;
-use futures::sync::mpsc::{unbounded, UnboundedSender};
-use tokio;
-use tokio::net::{TcpListener, TcpStream};
+use futures::{Future, Stream, future, sync::mpsc::{unbounded, UnboundedSender}};
+use tokio::{self, net::{TcpListener, TcpStream}};
 use tokio_timer::Interval;
 
 use opcua_types::service_types::ServerState as ServerStateType;
@@ -133,8 +130,13 @@ impl Server {
             default_keep_alive_count: constants::DEFAULT_KEEP_ALIVE_COUNT,
             max_keep_alive_count: constants::MAX_KEEP_ALIVE_COUNT,
             max_lifetime_count: constants::MAX_KEEP_ALIVE_COUNT * 3,
+            max_method_calls: constants::MAX_METHOD_CALLS,
+            max_nodes_per_node_management: constants::MAX_NODES_PER_NODE_MANAGEMENT,
+            max_browse_paths_per_translate: constants::MAX_BROWSE_PATHS_PER_TRANSLATE,
             diagnostics,
             abort: false,
+            register_nodes_callback: None,
+            unregister_nodes_callback: None,
         };
         let server_state = Arc::new(RwLock::new(server_state));
 
@@ -187,7 +189,19 @@ impl Server {
             let sock_addr = server.get_socket_address();
             let server_state = trace_read_lock_unwrap!(server.server_state);
             let config = trace_read_lock_unwrap!(server_state.config);
-            (sock_addr, config.discovery_server_url.clone())
+
+            // Discovery url must be present and valid
+            let discovery_server_url = if let Some(ref discovery_server_url) = config.discovery_server_url {
+                if is_valid_opc_ua_url(discovery_server_url) {
+                    Some(discovery_server_url.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            (sock_addr, discovery_server_url)
         };
 
         if sock_addr.is_none() {
@@ -400,7 +414,7 @@ impl Server {
                 .take_while(move |_| {
                     trace!("discovery_server_register.take_while");
                     let server_state = trace_read_lock_unwrap!(server_state_for_take);
-                    future::ok(!server_state.is_abort())
+                    future::ok(server_state.is_running() && !server_state.is_abort())
                 })
                 .for_each(move |_| {
                     // Test if registration needs to happen, i.e. if this is first time around,
@@ -408,12 +422,7 @@ impl Server {
                     trace!("discovery_server_register.for_each");
                     let now = Instant::now();
                     let mut last_registered = trace_lock_unwrap!(last_registered);
-                    let register_server = if now.duration_since(*last_registered) >= register_duration {
-                        true
-                    } else {
-                        false
-                    };
-                    if register_server {
+                    if now.duration_since(*last_registered) >= register_duration {
                         *last_registered = now;
                         // Even though the client uses tokio internally, the client's API is synchronous
                         // so the registration will happen on its own thread. The expectation is that

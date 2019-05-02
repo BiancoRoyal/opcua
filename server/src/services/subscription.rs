@@ -6,17 +6,19 @@ use opcua_types::service_types::*;
 
 use crate::{
     subscriptions::subscription::Subscription,
+    address_space::AddressSpace,
     state::ServerState,
     session::Session,
     services::Service,
-    address_space::AddressSpace,
 };
 
 /// The subscription service. Allows the client to create, modify and delete subscriptions of monitored items
 /// on the server and to request publish of notifications.
 pub(crate) struct SubscriptionService;
 
-impl Service for SubscriptionService {}
+impl Service for SubscriptionService {
+    fn name(&self) -> String { String::from("SubscriptionService") }
+}
 
 impl SubscriptionService {
     pub fn new() -> SubscriptionService {
@@ -72,10 +74,10 @@ impl SubscriptionService {
             let (revised_publishing_interval, revised_max_keep_alive_count, revised_lifetime_count) =
                 SubscriptionService::revise_subscription_values(server_state, request.requested_publishing_interval, request.requested_max_keep_alive_count, request.requested_lifetime_count);
 
-            subscription.publishing_interval = revised_publishing_interval;
-            subscription.max_keep_alive_count = revised_max_keep_alive_count;
-            subscription.max_lifetime_count = revised_lifetime_count;
-            subscription.priority = request.priority;
+            subscription.set_publishing_interval(revised_publishing_interval);
+            subscription.set_max_keep_alive_count(revised_max_keep_alive_count);
+            subscription.set_max_lifetime_count(revised_lifetime_count);
+            subscription.set_priority(request.priority);
             subscription.reset_lifetime_counter();
             subscription.reset_keep_alive_counter();
             // ...max_notifications_per_publish??
@@ -91,13 +93,71 @@ impl SubscriptionService {
         Ok(response.into())
     }
 
-    /// Handles a DeleteSubscriptionsRequest
-    pub fn delete_subscriptions(&self, session: &mut Session, request: &DeleteSubscriptionsRequest) -> Result<SupportedMessage, StatusCode> {
-        if request.subscription_ids.is_none() {
+    /// Implementation of SetPublishingModeRequest service. See OPC Unified Architecture, Part 4 5.13.4
+    pub fn set_publishing_mode(&self, session: &mut Session, request: &SetPublishingModeRequest) -> Result<SupportedMessage, StatusCode> {
+        if is_empty_option_vec!(request.subscription_ids) {
             Ok(self.service_fault(&request.request_header, StatusCode::BadNothingToDo))
         } else {
+            let subscription_ids = request.subscription_ids.as_ref().unwrap();
             let results = {
-                let subscription_ids = request.subscription_ids.as_ref().unwrap();
+                let publishing_enabled = request.publishing_enabled;
+                let mut results = Vec::with_capacity(subscription_ids.len());
+                let subscriptions = &mut session.subscriptions;
+                for subscription_id in subscription_ids {
+                    if let Some(subscription) = subscriptions.get_mut(*subscription_id) {
+                        subscription.set_publishing_enabled(publishing_enabled);
+                        subscription.reset_lifetime_counter();
+                        results.push(StatusCode::Good);
+                    } else {
+                        results.push(StatusCode::BadSubscriptionIdInvalid);
+                    }
+                }
+                Some(results)
+            };
+            let diagnostic_infos = None;
+            let response = SetPublishingModeResponse {
+                response_header: ResponseHeader::new_good(&request.request_header),
+                results,
+                diagnostic_infos,
+            };
+            Ok(response.into())
+        }
+    }
+
+    /// Handles a TransferSubscriptionsRequest
+    pub fn transfer_subscriptions(&self, _session: &mut Session, request: &TransferSubscriptionsRequest) -> Result<SupportedMessage, StatusCode> {
+        if is_empty_option_vec!(request.subscription_ids) {
+            Ok(self.service_fault(&request.request_header, StatusCode::BadNothingToDo))
+        } else {
+            let subscription_ids = request.subscription_ids.as_ref().unwrap();
+            let results = {
+                // TODO this is a stub. The real thing should look up subscriptions belonging to
+                //  other sessions and transfer them across to this one.
+                let results = subscription_ids.iter().map(|_subscription_id| {
+                    TransferResult {
+                        status_code: StatusCode::BadSubscriptionIdInvalid,
+                        available_sequence_numbers: None,
+                    }
+                }).collect::<Vec<TransferResult>>();
+                Some(results)
+            };
+            let diagnostic_infos = None;
+            let response = TransferSubscriptionsResponse {
+                response_header: ResponseHeader::new_good(&request.request_header),
+                results,
+                diagnostic_infos,
+            };
+            Ok(response.into())
+        }
+    }
+
+    /// Handles a DeleteSubscriptionsRequest
+    pub fn delete_subscriptions(&self, session: &mut Session, request: &DeleteSubscriptionsRequest) -> Result<SupportedMessage, StatusCode> {
+        if is_empty_option_vec!(request.subscription_ids) {
+            Ok(self.service_fault(&request.request_header, StatusCode::BadNothingToDo))
+        } else {
+            let subscription_ids = request.subscription_ids.as_ref().unwrap();
+            let results = {
                 let subscriptions = &mut session.subscriptions;
                 // Attempt to remove each subscription
                 let results = subscription_ids.iter().map(|subscription_id| {
@@ -120,72 +180,14 @@ impl SubscriptionService {
         }
     }
 
-    /// Handles a TransferSubscriptionsRequest
-    pub fn transfer_subscriptions(&self, _session: &mut Session, request: &TransferSubscriptionsRequest) -> Result<SupportedMessage, StatusCode> {
-        if request.subscription_ids.is_none() {
-            Ok(self.service_fault(&request.request_header, StatusCode::BadNothingToDo))
-        } else {
-            let results = {
-                // TODO this is a stub. The real thing should look up subscriptions belonging to
-                //  other sessions and transfer them across to this one.
-                let subscription_ids = request.subscription_ids.as_ref().unwrap();
-                let results = subscription_ids.iter().map(|_subscription_id| {
-                    TransferResult {
-                        status_code: StatusCode::BadSubscriptionIdInvalid,
-                        available_sequence_numbers: None,
-                    }
-                }).collect::<Vec<TransferResult>>();
-                Some(results)
-            };
-            let diagnostic_infos = None;
-            let response = TransferSubscriptionsResponse {
-                response_header: ResponseHeader::new_good(&request.request_header),
-                results,
-                diagnostic_infos,
-            };
-            Ok(response.into())
-        }
-    }
-
-    /// Handles a SerPublishingModeRequest
-    pub fn set_publishing_mode(&self, session: &mut Session, request: &SetPublishingModeRequest) -> Result<SupportedMessage, StatusCode> {
-        if request.subscription_ids.is_none() {
-            Ok(self.service_fault(&request.request_header, StatusCode::BadNothingToDo))
-        } else {
-            let results = {
-                let publishing_enabled = request.publishing_enabled;
-                let subscription_ids = request.subscription_ids.as_ref().unwrap();
-                let mut results = Vec::with_capacity(subscription_ids.len());
-                let subscriptions = &mut session.subscriptions;
-                for subscription_id in subscription_ids {
-                    if let Some(subscription) = subscriptions.get_mut(*subscription_id) {
-                        subscription.publishing_enabled = publishing_enabled;
-                        subscription.reset_lifetime_counter();
-                        results.push(StatusCode::Good);
-                    } else {
-                        results.push(StatusCode::BadSubscriptionIdInvalid);
-                    }
-                }
-                Some(results)
-            };
-            let diagnostic_infos = None;
-            let response = SetPublishingModeResponse {
-                response_header: ResponseHeader::new_good(&request.request_header),
-                results,
-                diagnostic_infos,
-            };
-            Ok(response.into())
-        }
-    }
-
     /// Handles a PublishRequest. This is asynchronous, so the response will be sent later on.
-    pub fn async_publish(&self, session: &mut Session, request_id: u32, address_space: &AddressSpace, request: &PublishRequest) -> Result<Option<SupportedMessage>, StatusCode> {
+    pub fn async_publish(&self, now: &DateTimeUtc, session: &mut Session, address_space: &AddressSpace, request_id: u32, request: &PublishRequest) -> Result<Option<SupportedMessage>, StatusCode> {
         trace!("--> Receive a PublishRequest {:?}", request);
         if session.subscriptions.is_empty() {
             Ok(Some(self.service_fault(&request.request_header, StatusCode::BadNoSubscription)))
         } else {
             let request_header = request.request_header.clone();
-            let result = session.enqueue_publish_request(address_space, request_id, request.clone());
+            let result = session.enqueue_publish_request(now, request_id, request.clone(), address_space);
             if let Err(error) = result {
                 Ok(Some(self.service_fault(&request_header, error)))
             } else {

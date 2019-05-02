@@ -1,3 +1,5 @@
+use std::convert::TryFrom;
+
 use crate::variant::{Variant, VariantTypeId, MultiDimensionArray};
 
 #[test]
@@ -70,7 +72,7 @@ fn variant_u32_array() {
     let vars = [1u32, 2u32, 3u32];
     let v = Variant::from(&vars[..]);
     assert!(v.is_array());
-    assert!(v.is_numeric_array());
+    assert!(v.is_array_of_type(VariantTypeId::UInt32));
     assert!(v.is_valid());
 
     match v {
@@ -93,11 +95,23 @@ fn variant_u32_array() {
 }
 
 #[test]
+fn variant_try_into_u32_array() {
+    let vars = [1u32, 2u32, 3u32];
+    let v = Variant::from(&vars[..]);
+    assert!(v.is_array());
+    assert!(v.is_array_of_type(VariantTypeId::UInt32));
+    assert!(v.is_valid());
+
+    let result = <Vec<u32>>::try_from(&v).unwrap();
+    assert_eq!(result.len(), 3);
+}
+
+#[test]
 fn variant_i32_array() {
     let vars = [1, 2, 3];
     let v = Variant::from(&vars[..]);
     assert!(v.is_array());
-    assert!(v.is_numeric_array());
+    assert!(v.is_array_of_type(VariantTypeId::Int32));
     assert!(v.is_valid());
 
     match v {
@@ -123,7 +137,8 @@ fn variant_i32_array() {
 fn variant_invalid_array() {
     let v = Variant::Array(vec![Variant::from(10), Variant::from("hello")]);
     assert!(v.is_array());
-    assert!(!v.is_numeric_array());
+    assert!(!v.is_array_of_type(VariantTypeId::Int32));
+    assert!(!v.is_array_of_type(VariantTypeId::String));
     assert!(!v.is_valid());
 }
 
@@ -131,21 +146,21 @@ fn variant_invalid_array() {
 fn variant_multi_dimensional_array() {
     let v = Variant::from(MultiDimensionArray::new(vec![Variant::from(10)], vec![1]));
     assert!(v.is_array());
-    assert!(v.is_numeric_array());
+    assert!(v.is_array_of_type(VariantTypeId::Int32));
     assert!(v.is_valid());
 
     let v = Variant::from(MultiDimensionArray::new(vec![Variant::from(10), Variant::from(10)], vec![2]));
     assert!(v.is_array());
-    assert!(v.is_numeric_array());
+    assert!(v.is_array_of_type(VariantTypeId::Int32));
     assert!(v.is_valid());
 
     let v = Variant::from(MultiDimensionArray::new(vec![Variant::from(10), Variant::from(10)], vec![1, 2]));
     assert!(v.is_array());
-    assert!(v.is_numeric_array());
+    assert!(v.is_array_of_type(VariantTypeId::Int32));
     assert!(v.is_valid());
 
     let v = Variant::from(MultiDimensionArray::new(vec![Variant::from(10), Variant::from(10)], vec![1, 2, 3]));
     assert!(v.is_array());
-    assert!(v.is_numeric_array());
+    assert!(v.is_array_of_type(VariantTypeId::Int32));
     assert!(!v.is_valid());
 }

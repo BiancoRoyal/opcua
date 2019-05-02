@@ -1,6 +1,6 @@
 # Introduction
 
-An [OPC UA](https://opcfoundation.org/about/opc-technologies/opc-ua/) server / client API implementation for Rust.
+This is an [OPC UA](https://opcfoundation.org/about/opc-technologies/opc-ua/) server / client API implementation for Rust.
 
 <table>
   <tr>
@@ -25,8 +25,7 @@ The code is licenced under [MPL-2.0](https://opensource.org/licenses/MPL-2.0). L
 
 # Setup
 
-Read the [setup](./docs/setup.md) for instructions on building OPCUA for Rust and more in-depth thoughts on the whys 
-and wherefores about the implementation.
+Read the [setup](./docs/setup.md) for instructions on building OPCUA for Rust.
 
 ## Cross-compile
 
@@ -37,7 +36,9 @@ platforms.
 
 Read the [change log](./CHANGELOG.md) for changes per version as well as aspirational / upcoming work.
 
-The API documentation is generated from the latest published crates which may be some way behind current development. 
+Read the [compatibility](./docs/compatibility.md) page for how the implementation conforms with the OPC UA spec.
+
+The API documentation is generated from the latest published crates. This may be some way behind current development. 
 
 <table>
     <tr>
@@ -79,7 +80,7 @@ cargo run
 The full list of samples:
 
 1. `simple-server` - an OPC UA server that adds 4 variables v1, v2, v3 and v4 and updates them from a timer via push and pull mechanisms.
-2. `simple-client` - an OPC UA client that connects to a server and requests the values of v1, v2, v3 and v4. It may also subscribe to changes to these values.
+2. `simple-client` - an OPC UA client that connects to a server and subscribes to the values of v1, v2, v3 and v4.
 3. `discovery-client` - an OPC UA client that connects to a discovery server and lists the servers registered on it.
 4. `gfx-client` - an OPC UA client that displays changing values graphically.
 5. `chess-server` - an OPC UA server that connects to a chess engine as its back end and updates variables representing the state of the game.

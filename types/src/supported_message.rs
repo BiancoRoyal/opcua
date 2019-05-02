@@ -103,12 +103,24 @@ impl SupportedMessage {
             SupportedMessage::CancelResponse(ref r) => r.response_header.request_handle,
             SupportedMessage::ActivateSessionRequest(ref r) => r.request_header.request_handle,
             SupportedMessage::ActivateSessionResponse(ref r) => r.response_header.request_handle,
+            SupportedMessage::AddNodesRequest(ref r) => r.request_header.request_handle,
+            SupportedMessage::AddNodesResponse(ref r) => r.response_header.request_handle,
+            SupportedMessage::AddReferencesRequest(ref r) => r.request_header.request_handle,
+            SupportedMessage::AddReferencesResponse(ref r) => r.response_header.request_handle,
+            SupportedMessage::DeleteNodesRequest(ref r) => r.request_header.request_handle,
+            SupportedMessage::DeleteNodesResponse(ref r) => r.response_header.request_handle,
+            SupportedMessage::DeleteReferencesRequest(ref r) => r.request_header.request_handle,
+            SupportedMessage::DeleteReferencesResponse(ref r) => r.response_header.request_handle,
             SupportedMessage::CreateMonitoredItemsRequest(ref r) => r.request_header.request_handle,
             SupportedMessage::CreateMonitoredItemsResponse(ref r) => r.response_header.request_handle,
             SupportedMessage::ModifyMonitoredItemsRequest(ref r) => r.request_header.request_handle,
             SupportedMessage::ModifyMonitoredItemsResponse(ref r) => r.response_header.request_handle,
             SupportedMessage::DeleteMonitoredItemsRequest(ref r) => r.request_header.request_handle,
             SupportedMessage::DeleteMonitoredItemsResponse(ref r) => r.response_header.request_handle,
+            SupportedMessage::SetMonitoringModeRequest(ref r) => r.request_header.request_handle,
+            SupportedMessage::SetMonitoringModeResponse(ref r) => r.response_header.request_handle,
+            SupportedMessage::SetTriggeringRequest(ref r) => r.request_header.request_handle,
+            SupportedMessage::SetTriggeringResponse(ref r) => r.response_header.request_handle,
             SupportedMessage::CreateSubscriptionRequest(ref r) => r.request_header.request_handle,
             SupportedMessage::CreateSubscriptionResponse(ref r) => r.response_header.request_handle,
             SupportedMessage::ModifySubscriptionRequest(ref r) => r.request_header.request_handle,
@@ -129,6 +141,10 @@ impl SupportedMessage {
             SupportedMessage::RepublishResponse(ref r) => r.response_header.request_handle,
             SupportedMessage::TranslateBrowsePathsToNodeIdsRequest(ref r) => r.request_header.request_handle,
             SupportedMessage::TranslateBrowsePathsToNodeIdsResponse(ref r) => r.response_header.request_handle,
+            SupportedMessage::RegisterNodesRequest(ref r) => r.request_header.request_handle,
+            SupportedMessage::RegisterNodesResponse(ref r) => r.response_header.request_handle,
+            SupportedMessage::UnregisterNodesRequest(ref r) => r.request_header.request_handle,
+            SupportedMessage::UnregisterNodesResponse(ref r) => r.response_header.request_handle,
             SupportedMessage::ReadRequest(ref r) => r.request_header.request_handle,
             SupportedMessage::ReadResponse(ref r) => r.response_header.request_handle,
             SupportedMessage::WriteRequest(ref r) => r.request_header.request_handle,
@@ -198,6 +214,30 @@ impl SupportedMessage {
             ObjectId::ActivateSessionResponse_Encoding_DefaultBinary => {
                 ActivateSessionResponse::decode(stream, decoding_limits)?.into()
             }
+            ObjectId::AddNodesRequest_Encoding_DefaultBinary => {
+                AddNodesRequest::decode(stream, decoding_limits)?.into()
+            }
+            ObjectId::AddNodesResponse_Encoding_DefaultBinary => {
+                AddNodesResponse::decode(stream, decoding_limits)?.into()
+            }
+            ObjectId::AddReferencesRequest_Encoding_DefaultBinary => {
+                AddReferencesRequest::decode(stream, decoding_limits)?.into()
+            }
+            ObjectId::AddReferencesResponse_Encoding_DefaultBinary => {
+                AddReferencesResponse::decode(stream, decoding_limits)?.into()
+            }
+            ObjectId::DeleteNodesRequest_Encoding_DefaultBinary => {
+                DeleteNodesRequest::decode(stream, decoding_limits)?.into()
+            }
+            ObjectId::DeleteNodesResponse_Encoding_DefaultBinary => {
+                DeleteNodesResponse::decode(stream, decoding_limits)?.into()
+            }
+            ObjectId::DeleteReferencesRequest_Encoding_DefaultBinary => {
+                DeleteReferencesRequest::decode(stream, decoding_limits)?.into()
+            }
+            ObjectId::DeleteReferencesResponse_Encoding_DefaultBinary => {
+                DeleteReferencesResponse::decode(stream, decoding_limits)?.into()
+            }
             ObjectId::CreateMonitoredItemsRequest_Encoding_DefaultBinary => {
                 CreateMonitoredItemsRequest::decode(stream, decoding_limits)?.into()
             }
@@ -215,6 +255,18 @@ impl SupportedMessage {
             }
             ObjectId::DeleteMonitoredItemsResponse_Encoding_DefaultBinary => {
                 DeleteMonitoredItemsResponse::decode(stream, decoding_limits)?.into()
+            }
+            ObjectId::SetMonitoringModeRequest_Encoding_DefaultBinary => {
+                SetMonitoringModeRequest::decode(stream, decoding_limits)?.into()
+            }
+            ObjectId::SetMonitoringModeResponse_Encoding_DefaultBinary => {
+                SetMonitoringModeResponse::decode(stream, decoding_limits)?.into()
+            }
+            ObjectId::SetTriggeringRequest_Encoding_DefaultBinary => {
+                SetTriggeringRequest::decode(stream, decoding_limits)?.into()
+            }
+            ObjectId::SetTriggeringResponse_Encoding_DefaultBinary => {
+                SetTriggeringResponse::decode(stream, decoding_limits)?.into()
             }
             ObjectId::CreateSubscriptionRequest_Encoding_DefaultBinary => {
                 CreateSubscriptionRequest::decode(stream, decoding_limits)?.into()
@@ -276,6 +328,18 @@ impl SupportedMessage {
             ObjectId::TranslateBrowsePathsToNodeIdsResponse_Encoding_DefaultBinary => {
                 TranslateBrowsePathsToNodeIdsResponse::decode(stream, decoding_limits)?.into()
             }
+            ObjectId::RegisterNodesRequest_Encoding_DefaultBinary => {
+                RegisterNodesRequest::decode(stream, decoding_limits)?.into()
+            }
+            ObjectId::RegisterNodesResponse_Encoding_DefaultBinary => {
+                RegisterNodesResponse::decode(stream, decoding_limits)?.into()
+            }
+            ObjectId::UnregisterNodesRequest_Encoding_DefaultBinary => {
+                UnregisterNodesRequest::decode(stream, decoding_limits)?.into()
+            }
+            ObjectId::UnregisterNodesResponse_Encoding_DefaultBinary => {
+                UnregisterNodesResponse::decode(stream, decoding_limits)?.into()
+            }
             ObjectId::ReadRequest_Encoding_DefaultBinary => {
                 ReadRequest::decode(stream, decoding_limits)?.into()
             }
@@ -325,12 +389,24 @@ supported_messages_enum![
     CancelResponse,
     ActivateSessionRequest,
     ActivateSessionResponse,
+    AddNodesRequest,
+    AddNodesResponse,
+    AddReferencesRequest,
+    AddReferencesResponse,
+    DeleteNodesRequest,
+    DeleteNodesResponse,
+    DeleteReferencesRequest,
+    DeleteReferencesResponse,
     CreateMonitoredItemsRequest,
     CreateMonitoredItemsResponse,
     ModifyMonitoredItemsRequest,
     ModifyMonitoredItemsResponse,
     DeleteMonitoredItemsRequest,
     DeleteMonitoredItemsResponse,
+    SetMonitoringModeRequest,
+    SetMonitoringModeResponse,
+    SetTriggeringRequest,
+    SetTriggeringResponse,
     CreateSubscriptionRequest,
     CreateSubscriptionResponse,
     ModifySubscriptionRequest,
@@ -351,6 +427,10 @@ supported_messages_enum![
     RepublishResponse,
     TranslateBrowsePathsToNodeIdsRequest,
     TranslateBrowsePathsToNodeIdsResponse,
+    RegisterNodesRequest,
+    RegisterNodesResponse,
+    UnregisterNodesRequest,
+    UnregisterNodesResponse,
     ReadRequest,
     ReadResponse,
     WriteRequest,

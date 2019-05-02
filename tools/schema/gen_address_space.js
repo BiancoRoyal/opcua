@@ -53,16 +53,16 @@ let node_set =
 let parser = new xml2js.Parser();
 
 let modules = [];
-_.each(node_set, function (ns) {
+_.each(node_set, ns => {
     let data = fs.readFileSync(`${settings.schema_dir}/${ns.name}`);
-    parser.parseString(data, function (err, result) {
+    parser.parseString(data, (err, result) => {
         ns.data = result;
         console.log(`Generating code for module ${ns.module}`);
         let node_set_modules = generate_node_set(ns);
         modules.push(...node_set_modules)
     });
 });
-console.log(`modules = ${modules}`)
+console.log(`modules = ${modules}`);
 
 ///////////////////////////////////////////////////////////////////////////////
 // Create the mod.rs
@@ -75,7 +75,7 @@ use crate::address_space::types::AddressSpace;
 `;
 
 // use each part
-_.each(modules, function (module) {
+_.each(modules, module => {
     mod_contents += `mod ${module};\n`
 });
 mod_contents += `\n`;
@@ -84,7 +84,7 @@ mod_contents += `\n`;
 mod_contents += `/// Populates the address space with all defined node sets
 pub fn populate_address_space(address_space: &mut AddressSpace) {\n`;
 
-_.each(modules, function (module) {
+_.each(modules, module => {
     mod_contents += `    ${module}::populate_address_space(address_space);\n`
 });
 
@@ -99,39 +99,48 @@ function generate_node_set(ns) {
     // Gather up all the nodes in the nodeset
     let nodeset = ns.data["UANodeSet"];
 
+    let alias_map = {};
+    if (_.has(nodeset, "Aliases")) {
+        _.each(nodeset["Aliases"], node => {
+            _.each(node["Alias"], alias => {
+                alias_map[alias["$"]["Alias"]] = alias["_"];
+            });
+        });
+    }
+
     let nodes = [];
     if (_.has(nodeset, "UAObject")) {
-        _.each(nodeset["UAObject"], function (node) {
+        _.each(nodeset["UAObject"], node => {
             nodes.push(["Object", node]);
         });
     }
     if (_.has(nodeset, "UAObjectType")) {
-        _.each(nodeset["UAObjectType"], function (node) {
+        _.each(nodeset["UAObjectType"], node => {
             nodes.push(["ObjectType", node]);
         });
     }
     if (_.has(nodeset, "UADataType")) {
-        _.each(nodeset["UADataType"], function (node) {
+        _.each(nodeset["UADataType"], node => {
             nodes.push(["DataType", node]);
         });
     }
     if (_.has(nodeset, "UAReferenceType")) {
-        _.each(nodeset["UAReferenceType"], function (node) {
+        _.each(nodeset["UAReferenceType"], node => {
             nodes.push(["ReferenceType", node]);
         });
     }
     if (_.has(nodeset, "UAVariable")) {
-        _.each(nodeset["UAVariable"], function (node) {
+        _.each(nodeset["UAVariable"], node => {
             nodes.push(["Variable", node]);
         });
     }
     if (_.has(nodeset, "UAVariableType")) {
-        _.each(nodeset["UAVariableType"], function (node) {
+        _.each(nodeset["UAVariableType"], node => {
             nodes.push(["VariableType", node]);
         });
     }
     if (_.has(nodeset, "UAMethod")) {
-        _.each(nodeset["UAMethod"], function (node) {
+        _.each(nodeset["UAMethod"], node => {
             nodes.push(["Method", node]);
         });
     }
@@ -139,21 +148,21 @@ function generate_node_set(ns) {
     // Generate source files for the nodeset, ensuring no more than MAX_NODES_PER_FILE
     let modules = [];
     if (nodes.length <= MAX_NODES_PER_FILE) {
-        modules.push(generate_node_set_files(ns.name, ns.module, 0, nodes));
+        modules.push(generate_node_set_files(ns.name, ns.module, 0, nodes, alias_map));
     } else {
         let part_nr = 1;
         let node_start = 0;
         while (node_start < nodes.length) {
             let node_slice = nodes.slice(node_start, node_start + MAX_NODES_PER_FILE);
-            modules.push(generate_node_set_files(ns.name, ns.module, part_nr++, node_slice));
+            modules.push(generate_node_set_files(ns.name, ns.module, part_nr++, node_slice, alias_map));
             node_start += MAX_NODES_PER_FILE;
         }
     }
     return modules;
 }
 
-function generate_node_set_files(xml_name, rs_name, part_nr, nodes) {
-    let module_name = part_nr > 0 ? `${rs_name}_${part_nr}` : `${rs_name}`
+function generate_node_set_files(xml_name, rs_name, part_nr, nodes, alias_map) {
+    let module_name = part_nr > 0 ? `${rs_name}_${part_nr}` : `${rs_name}`;
     let file_name = `${module_name}.rs`;
 
     // Process all the nodes
@@ -183,7 +192,7 @@ use crate::address_space::types::*;
 
     let fn_names = [];
     let idx = 1;
-    _.each(nodes, function (tuple) {
+    _.each(nodes, tuple => {
         let node_type = tuple[0];
         let node = tuple[1];
         let fn_name = insert_node_fn_name(idx++, node_type);
@@ -195,16 +204,16 @@ use crate::address_space::types::*;
     if (trace) {
         contents += `    trace!("Populating address space with node set ${ns.name}");\n`
     }
-    _.each(fn_names, function (fn_name) {
+    _.each(fn_names, fn_name => {
         contents += `    ${fn_name}(address_space);\n`;
     });
     contents += `}\n\n`;
 
     idx = 0;
-    _.each(nodes, function (tuple) {
+    _.each(nodes, tuple => {
         let node_type = tuple[0];
         let node = tuple[1];
-        contents += insert_node(fn_names[idx++], node_type, node);
+        contents += insert_node(fn_names[idx++], node_type, node, alias_map);
     });
 
     settings.write_to_file(`${settings.rs_address_space_dir}/${file_name}`, contents);
@@ -220,7 +229,15 @@ function node_id_ctor(snippet) {
     return `NodeId::new(0, ${snippet.substr(2)})`;
 }
 
-function insert_node(fn_name, node_type, node) {
+function data_type_node_id(alias_map, data_type) {
+    if (_.has(alias_map, data_type)) {
+        return node_id_ctor(alias_map[data_type]);
+    } else {
+        return node_id_ctor(data_type);
+    }
+}
+
+function insert_node(fn_name, node_type, node, alias_map) {
     let contents = `fn ${fn_name}(address_space: &mut AddressSpace) {\n`;
     let indent = "    ";
 
@@ -236,32 +253,28 @@ function insert_node(fn_name, node_type, node) {
         contents += `${indent}let name = "${browse_name}";\n`;
         browse_name_var = "name";
         display_name_var = "name";
-    }
-    else {
+    } else {
         contents += `${indent}let browse_name = "${browse_name}";\n`;
         contents += `${indent}let display_name = "${display_name}";\n`;
         browse_name_var = "browse_name";
         display_name_var = "display_name";
     }
 
-    let description = _.has(node, "Description") ? node["Description"][0] : "";
-    contents += `${indent}let description = "${description}";\n`;
-
     // Process values
     let node_ctor = "";
     if (node_type === "Object") {
-        node_ctor = `Object::new(&node_id, ${browse_name_var}, ${display_name_var}, description)`;
+        node_ctor = `Object::new(&node_id, ${browse_name_var}, ${display_name_var}, 0)`;
     } else if (node_type === "ObjectType") {
         let is_abstract = _.has(node["$"], "IsAbstract") && node["$"]["IsAbstract"] === "true";
-        node_ctor = `ObjectType::new(&node_id, ${browse_name_var}, ${display_name_var}, description, ${is_abstract})`;
+        node_ctor = `ObjectType::new(&node_id, ${browse_name_var}, ${display_name_var}, ${is_abstract})`;
     } else if (node_type === "DataType") {
         let is_abstract = _.has(node["$"], "IsAbstract") && node["$"]["IsAbstract"] === "true";
-        node_ctor = `DataType::new(&node_id, ${browse_name_var}, ${display_name_var}, description, ${is_abstract})`;
+        node_ctor = `DataType::new(&node_id, ${browse_name_var}, ${display_name_var}, ${is_abstract})`;
     } else if (node_type === "ReferenceType") {
         let is_abstract = _.has(node["$"], "IsAbstract") && node["$"]["IsAbstract"] === "true";
         let inverse_name = _.has(node, "InverseName") ? `Some(LocalizedText::new("", "${node["InverseName"][0]}"))` : "None";
         let symmetric = _.has(node["$"], "Symmetric") && node["$"]["Symmetric"] === "true";
-        node_ctor = `ReferenceType::new(&node_id, ${browse_name_var}, ${display_name_var}, description, ${inverse_name}, ${symmetric}, ${is_abstract})`
+        node_ctor = `ReferenceType::new(&node_id, ${browse_name_var}, ${display_name_var}, ${inverse_name}, ${symmetric}, ${is_abstract})`
     } else if (node_type === "Variable") {
         let data_type = "DataTypeId::Boolean";
         if (_.has(node["$"], "DataType")) {
@@ -287,7 +300,7 @@ function insert_node(fn_name, node_type, node) {
                 let list = value["ListOfExtensionObject"][0];
 
                 let var_arguments = [];
-                _.each(list["ExtensionObject"], function (extension_object) {
+                _.each(list["ExtensionObject"], extension_object => {
                     // Create a value consisting an array of extension objects
                     let node_id = (extension_object["TypeId"][0])["Identifier"][0];
                     let body = extension_object["Body"][0];
@@ -326,7 +339,6 @@ function insert_node(fn_name, node_type, node) {
                             console.log("ArrayDimensions is not read - setting dimensions to 0 which means variable length");
                             array_dimensions = "Some(vec![0])"
                         }
-                        // let description = argument["Description"][0];
                         var_arguments.push({
                             node_id: node_id,
                             name: name,
@@ -340,7 +352,7 @@ function insert_node(fn_name, node_type, node) {
 
                 if (var_arguments.length > 0) {
                     contents += `${indent}let data_value = DataValue::new(vec![\n`;
-                    _.each(var_arguments, function (a) {
+                    _.each(var_arguments, a => {
                         contents += `${indent}    Variant::from(ExtensionObject::from_encodable(\n`;
                         contents += `${indent}        ${node_id_ctor(a.node_id)}, &Argument {\n`;
                         contents += `${indent}            name: UAString::from("${a.name}"),\n`;
@@ -360,16 +372,16 @@ function insert_node(fn_name, node_type, node) {
         if (!data_value_is_set) {
             contents += `${indent}let data_value = DataValue::null();\n`
         }
-        node_ctor = `Variable::new_data_value(&node_id, ${browse_name_var}, ${display_name_var}, description, ${data_type}, data_value)`;
+        node_ctor = `Variable::new_data_value(&node_id, ${browse_name_var}, ${display_name_var}, ${data_type}, data_value)`;
     } else if (node_type === "VariableType") {
+        let data_type = _.has(node["$"], "DataType") ? data_type_node_id(alias_map, node["$"]["DataType"]) : "NodeId::null()";
         let is_abstract = _.has(node["$"], "IsAbstract") && node["$"]["IsAbstract"] === "true";
         let value_rank = _.has(node["$"], "ValueRank") ? node["$"]["ValueRank"] : -1;
-        node_ctor = `VariableType::new(&node_id, ${browse_name_var}, ${display_name_var}, description, ${is_abstract}, ${value_rank})`;
+        node_ctor = `VariableType::new(&node_id, ${browse_name_var}, ${display_name_var}, ${data_type}, ${is_abstract}, ${value_rank})`;
     } else if (node_type === "Method") {
-        let is_abstract = _.has(node["$"], "IsAbstract") && node["$"]["IsAbstract"] === "true";
-        let executable = false; // TODO
-        let user_executable = false; // TODO
-        node_ctor = `Method::new(&node_id, ${browse_name_var}, ${display_name_var}, description, ${is_abstract}, ${executable}, ${user_executable})`;
+        let executable = true; // TODO
+        let user_executable = true; // TODO
+        node_ctor = `Method::new(&node_id, ${browse_name_var}, ${display_name_var}, ${executable}, ${user_executable})`;
     }
 
     let node_id = node["$"]["NodeId"];
@@ -379,7 +391,13 @@ function insert_node(fn_name, node_type, node) {
         contents += `${indent}trace!("Inserting node id ${node_id}of type ${node_type}");\n`;
     }
 
-    contents += `${indent}let node = ${node_ctor};\n`;
+    let description = _.has(node, "Description") ? node["Description"][0] : "";
+    if (description.length > 0) {
+        contents += `${indent}let mut node = ${node_ctor};\n`;
+        contents += `${indent}node.set_description(LocalizedText::from("${description}"));\n`;
+    } else {
+        contents += `${indent}let node = ${node_ctor};\n`;
+    }
     contents += `${indent}address_space.insert(node, `;
 
     let node_references = [];
@@ -400,7 +418,7 @@ function insert_node(fn_name, node_type, node) {
 
     if (node_references.length > 0) {
         contents += "Some(&[\n";
-        _.each(node_references, function (r) {
+        _.each(node_references, r => {
             contents += `${indent}    (&${r.node_other}, ${r.reference_type}, ${r.reference_direction}),\n`;
         });
         contents += `${indent}]));\n`;
@@ -423,7 +441,7 @@ function insert_node(fn_name, node_type, node) {
 function insert_references(indent, reference_element, node_references) {
     let contents = "";
     if (_.has(reference_element, "Reference")) {
-        _.each(reference_element["Reference"], function (reference) {
+        _.each(reference_element["Reference"], reference => {
             // Test if the reference is forward or reverse
             let is_forward = !_.has(reference["$"], "IsForward") || reference["$"]["IsForward"] === "true";
 
