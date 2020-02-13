@@ -23,6 +23,7 @@ use crate::{
     callbacks,
     constants,
     diagnostics::ServerDiagnostics,
+    historical::HistoryServerCapabilities,
     session::Session,
     state::ServerState,
 };
@@ -100,7 +101,7 @@ macro_rules! is_method {
 macro_rules! server_diagnostics_summary {
     ($address_space: expr, $variable_id: expr, $field: ident) => {
         let server_diagnostics = $address_space.server_diagnostics.as_ref().unwrap().clone();
-        $address_space.set_variable_getter($variable_id, move |_, _, _| {
+        $address_space.set_variable_getter($variable_id, move |_, _, _, _, _| {
             let server_diagnostics = server_diagnostics.read().unwrap();
             let server_diagnostics_summary = server_diagnostics.server_diagnostics_summary();
             Ok(Some(DataValue::from(Variant::from(server_diagnostics_summary.$field))))
@@ -400,13 +401,13 @@ impl AddressSpace {
             self.set_variable_value(Server_ServerStatus_StartTime, now.clone(), &now, &now);
 
             // Server_ServerStatus_CurrentTime
-            self.set_variable_getter(Server_ServerStatus_CurrentTime, move |_, _, _| {
+            self.set_variable_getter(Server_ServerStatus_CurrentTime, move |_, _, _, _, _| {
                 Ok(Some(DataValue::new(DateTime::now())))
             });
 
             // State OPC UA Part 5 12.6, Valid states are
             //     State (Server_ServerStatus_State)
-            self.set_variable_getter(Server_ServerStatus_State, move |_, _, _| {
+            self.set_variable_getter(Server_ServerStatus_State, move |_, _, _, _, _| {
                 // let server_state =  trace_read_lock_unwrap!(server_state);
                 Ok(Some(DataValue::new(0 as i32)))
             });
@@ -426,6 +427,24 @@ impl AddressSpace {
             self.register_method_handler(MethodId::Server_ResendData, Box::new(method_impls::ServerResendDataMethod));
             self.register_method_handler(MethodId::Server_GetMonitoredItems, Box::new(method_impls::ServerGetMonitoredItemsMethod));
         }
+    }
+
+    /// Sets the history server capabilities based on the supplied flags
+    pub fn set_history_server_capabilities(&mut self, capabilities: &HistoryServerCapabilities) {
+        let now = DateTime::now();
+        self.set_variable_value(HistoryServerCapabilities_AccessHistoryDataCapability, capabilities.access_history_data, &now, &now);
+        self.set_variable_value(HistoryServerCapabilities_AccessHistoryEventsCapability, capabilities.access_history_events, &now, &now);
+        self.set_variable_value(HistoryServerCapabilities_MaxReturnDataValues, capabilities.max_return_data, &now, &now);
+        self.set_variable_value(HistoryServerCapabilities_MaxReturnEventValues, capabilities.max_return_events, &now, &now);
+        self.set_variable_value(HistoryServerCapabilities_InsertDataCapability, capabilities.insert_data, &now, &now);
+        self.set_variable_value(HistoryServerCapabilities_ReplaceDataCapability, capabilities.replace_data, &now, &now);
+        self.set_variable_value(HistoryServerCapabilities_UpdateDataCapability, capabilities.update_data, &now, &now);
+        self.set_variable_value(HistoryServerCapabilities_DeleteRawCapability, capabilities.delete_raw, &now, &now);
+        self.set_variable_value(HistoryServerCapabilities_DeleteAtTimeCapability, capabilities.delete_at_time, &now, &now);
+        self.set_variable_value(HistoryServerCapabilities_InsertEventCapability, capabilities.insert_event, &now, &now);
+        self.set_variable_value(HistoryServerCapabilities_ReplaceEventCapability, capabilities.replace_event, &now, &now);
+        self.set_variable_value(HistoryServerCapabilities_UpdateEventCapability, capabilities.update_event, &now, &now);
+        self.set_variable_value(HistoryServerCapabilities_InsertAnnotationCapability, capabilities.insert_annotation, &now, &now);
     }
 
     /// Returns the root folder
@@ -643,7 +662,7 @@ impl AddressSpace {
     /// NodeId does not exist or is not a variable.
     pub fn get_variable_value<N>(&self, node_id: N) -> Result<DataValue, ()> where N: Into<NodeId> {
         self.find_variable(node_id)
-            .map(|variable| variable.value())
+            .map(|variable| variable.value(NumericRange::None, &QualifiedName::null()))
             .ok_or_else(|| ())
     }
 
@@ -859,7 +878,7 @@ impl AddressSpace {
     /// Sets the getter for a variable node
     fn set_variable_getter<N, F>(&mut self, variable_id: N, getter: F) where
         N: Into<NodeId>,
-        F: FnMut(&NodeId, AttributeId, f64) -> Result<Option<DataValue>, StatusCode> + Send + 'static
+        F: FnMut(&NodeId, AttributeId, NumericRange, &QualifiedName, f64) -> Result<Option<DataValue>, StatusCode> + Send + 'static
     {
         if let Some(ref mut v) = self.find_variable_mut(variable_id) {
             let getter = AttrFnGetter::new(getter);

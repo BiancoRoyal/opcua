@@ -140,6 +140,7 @@ fn object_attributes() {
 #[test]
 fn find_node_by_id() {
     let address_space = make_sample_address_space();
+    let address_space = trace_read_lock_unwrap!(address_space);
 
     assert!(!address_space.node_exists(&NodeId::null()));
     assert!(!address_space.node_exists(&NodeId::new(11, "v3")));
@@ -158,6 +159,7 @@ fn dump_references(references: &Vec<Reference>) {
 #[test]
 fn find_references_by_direction() {
     let address_space = make_sample_address_space();
+    let address_space = trace_read_lock_unwrap!(address_space);
 
     let (references, _inverse_ref_idx) = address_space.find_references_by_direction::<ReferenceTypeId>(&NodeId::objects_folder_id(), BrowseDirection::Forward, None);
     dump_references(&references);
@@ -190,6 +192,7 @@ fn find_references_by_direction() {
 #[test]
 fn find_references() {
     let address_space = make_sample_address_space();
+    let address_space = trace_read_lock_unwrap!(address_space);
 
     let references = address_space.find_references(&NodeId::root_folder_id(), Some((ReferenceTypeId::Organizes, false)));
     assert!(references.is_some());
@@ -220,6 +223,7 @@ fn find_references() {
 #[test]
 fn find_inverse_references() {
     let address_space = make_sample_address_space();
+    let address_space = trace_read_lock_unwrap!(address_space);
 
     //println!("{:#?}", address_space);
     let references = address_space.find_inverse_references(&NodeId::root_folder_id(), Some((ReferenceTypeId::Organizes, false)));
@@ -234,8 +238,9 @@ fn find_inverse_references() {
 #[test]
 fn find_reference_subtypes() {
     let address_space = make_sample_address_space();
-    let references = address_space.references();
+    let address_space = trace_read_lock_unwrap!(address_space);
 
+    let references = address_space.references();
     let reference_types = vec![
         (ReferenceTypeId::References, ReferenceTypeId::HierarchicalReferences),
         (ReferenceTypeId::References, ReferenceTypeId::HasChild),
@@ -339,6 +344,7 @@ fn multi_dimension_array_as_variable() {
 #[test]
 fn browse_nodes() {
     let address_space = make_sample_address_space();
+    let address_space = trace_read_lock_unwrap!(address_space);
 
     // Test that a node can be found
     let object_id = ObjectId::RootFolder.into();
@@ -426,7 +432,7 @@ fn variable_builder() {
     assert_eq!(v.value_rank(), 10);
     assert_eq!(v.array_dimensions().unwrap(), vec![1, 2, 3]);
     assert_eq!(v.historizing(), true);
-    assert_eq!(v.value().value.unwrap(), Variant::from(999));
+    assert_eq!(v.value(NumericRange::None, &QualifiedName::null()).value.unwrap(), Variant::from(999));
     assert_eq!(v.minimum_sampling_interval().unwrap(), 123.0);
 
     // Add a variable to the address space
@@ -482,7 +488,7 @@ fn method_builder() {
         // verify OutputArguments / Argument value
         assert_eq!(v.data_type(), DataTypeId::Argument.into());
         assert_eq!(v.display_name(), LocalizedText::from("OutputArguments"));
-        let v = v.value().value.unwrap();
+        let v = v.value(NumericRange::None, &QualifiedName::null()).value.unwrap();
         if let Variant::Array(v) = v {
             assert_eq!(v.len(), 1);
             let v = v.get(0).unwrap().clone();
@@ -638,7 +644,7 @@ fn hierarchical_references() {
     let node = ObjectId::Server_ServerCapabilities.into();
     let refs = address_space.find_hierarchical_references(&node).unwrap();
     println!("{:#?}", refs);
-    assert_eq!(refs.len(), 14);
+    assert_eq!(refs.len(), 15);
     assert!(refs.contains(&VariableId::Server_ServerCapabilities_ServerProfileArray.into()));
     assert!(refs.contains(&VariableId::Server_ServerCapabilities_LocaleIdArray.into()));
     assert!(refs.contains(&VariableId::Server_ServerCapabilities_MinSupportedSampleRate.into()));

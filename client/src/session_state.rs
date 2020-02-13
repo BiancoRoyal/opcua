@@ -1,8 +1,8 @@
 use std::{
     self,
     sync::{
-        Arc, RwLock,
-        atomic::{AtomicU32, Ordering},
+        Arc, atomic::{AtomicU32, Ordering},
+        RwLock,
     },
     u32,
 };
@@ -11,16 +11,17 @@ use chrono;
 
 use opcua_core::{
     comms::secure_channel::SecureChannel,
-    crypto::SecurityPolicy,
     handle::Handle,
+    supported_message::SupportedMessage,
 };
+use opcua_crypto::SecurityPolicy;
 use opcua_types::{
     *,
     status_code::StatusCode,
 };
 
 use crate::{
-    callbacks::{OnSessionClosed, OnConnectionStatusChange},
+    callbacks::{OnConnectionStatusChange, OnSessionClosed},
     message_queue::MessageQueue,
 };
 

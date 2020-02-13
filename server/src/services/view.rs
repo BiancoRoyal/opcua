@@ -1,32 +1,20 @@
+use opcua_core::supported_message::SupportedMessage;
+use opcua_crypto::random;
+use opcua_types::{
+    *,
+    node_ids::ReferenceTypeId,
+    status_code::StatusCode,
+};
 use std::result::Result;
 use std::sync::{Arc, Mutex, RwLock};
 
-use opcua_types::*;
-use opcua_types::status_code::StatusCode;
-use opcua_types::node_ids::ReferenceTypeId;
-
-use opcua_core::crypto::random;
-
 use crate::{
     address_space::{AddressSpace, relative_path},
+    continuation_point::BrowseContinuationPoint,
+    services::Service,
     session::Session,
     state::ServerState,
-    services::Service,
-    continuation_point::BrowseContinuationPoint,
 };
-
-// Bits that control the reference description coming back from browse()
-
-bitflags! {
-    pub struct BrowseDescriptionResultMask: u32 {
-        const RESULT_MASK_REFERENCE_TYPE = 1;
-        const RESULT_MASK_IS_FORWARD = 1 << 1;
-        const RESULT_MASK_NODE_CLASS = 1 << 2;
-        const RESULT_MASK_BROWSE_NAME = 1 << 3;
-        const RESULT_MASK_DISPLAY_NAME = 1 << 4;
-        const RESULT_MASK_TYPE_DEFINITION = 1 << 5;
-    }
-}
 
 /// The view service. Allows the client to browse the address space of the server.
 pub(crate) struct ViewService;
@@ -40,14 +28,17 @@ impl ViewService {
         ViewService {}
     }
 
-    pub fn browse(&self, session: &mut Session, address_space: &AddressSpace, request: &BrowseRequest) -> Result<SupportedMessage, StatusCode> {
+    pub fn browse(&self, session: Arc<RwLock<Session>>, address_space: Arc<RwLock<AddressSpace>>, request: &BrowseRequest) -> SupportedMessage {
         if is_empty_option_vec!(request.nodes_to_browse) {
-            Ok(self.service_fault(&request.request_header, StatusCode::BadNothingToDo))
+            self.service_fault(&request.request_header, StatusCode::BadNothingToDo)
         } else {
+            let mut session = trace_write_lock_unwrap!(session);
+            let address_space = trace_read_lock_unwrap!(address_space);
+
             if !request.view.view_id.is_null() {
                 // Views are not supported
                 info!("Browse request ignored because view was specified (views not supported)");
-                Ok(self.service_fault(&request.request_header, StatusCode::BadViewIdUnknown))
+                self.service_fault(&request.request_header, StatusCode::BadViewIdUnknown)
             } else {
                 // debug!("Browse request = {:#?}", request);
                 let nodes_to_browse = request.nodes_to_browse.as_ref().unwrap();
@@ -66,23 +57,24 @@ impl ViewService {
                 };
 
                 // Browse the nodes
-                let results = Some(Self::browse_nodes(session, address_space, nodes_to_browse, max_references_per_node as usize));
+                let results = Some(Self::browse_nodes(&mut session, &address_space, nodes_to_browse, max_references_per_node as usize));
                 let diagnostic_infos = None;
-                let response = BrowseResponse {
+                BrowseResponse {
                     response_header: ResponseHeader::new_good(&request.request_header),
                     results,
                     diagnostic_infos,
-                };
-                // debug!("Browse response = {:#?}", response);
-                Ok(response.into())
+                }.into()
             }
         }
     }
 
-    pub fn browse_next(&self, session: &mut Session, address_space: &AddressSpace, request: &BrowseNextRequest) -> Result<SupportedMessage, StatusCode> {
+    pub fn browse_next(&self, session: Arc<RwLock<Session>>, address_space: Arc<RwLock<AddressSpace>>, request: &BrowseNextRequest) -> SupportedMessage {
         if is_empty_option_vec!(request.continuation_points) {
-            Ok(self.service_fault(&request.request_header, StatusCode::BadNothingToDo))
+            self.service_fault(&request.request_header, StatusCode::BadNothingToDo)
         } else {
+            let mut session = trace_write_lock_unwrap!(session);
+            let address_space = trace_read_lock_unwrap!(address_space);
+
             let continuation_points = request.continuation_points.as_ref().unwrap();
             let results = if request.release_continuation_points {
                 session.remove_browse_continuation_points(continuation_points);
@@ -90,30 +82,32 @@ impl ViewService {
             } else {
                 // Iterate from the continuation point, assuming it is valid
                 let results = continuation_points.iter().map(|continuation_point| {
-                    Self::browse_from_continuation_point(session, address_space, continuation_point)
+                    Self::browse_from_continuation_point(&mut session, &address_space, continuation_point)
                 }).collect();
                 Some(results)
             };
 
             let diagnostic_infos = None;
-            let response = BrowseNextResponse {
+            BrowseNextResponse {
                 response_header: ResponseHeader::new_good(&request.request_header),
                 results,
                 diagnostic_infos,
-            };
-            Ok(response.into())
+            }.into()
         }
     }
 
-    pub fn translate_browse_paths_to_node_ids(&self, server_state: &ServerState, address_space: &AddressSpace, request: &TranslateBrowsePathsToNodeIdsRequest) -> Result<SupportedMessage, StatusCode> {
+    pub fn translate_browse_paths_to_node_ids(&self, server_state: Arc<RwLock<ServerState>>, address_space: Arc<RwLock<AddressSpace>>, request: &TranslateBrowsePathsToNodeIdsRequest) -> SupportedMessage {
         if is_empty_option_vec!(request.browse_paths) {
-            Ok(self.service_fault(&request.request_header, StatusCode::BadNothingToDo))
+            self.service_fault(&request.request_header, StatusCode::BadNothingToDo)
         } else {
+            let server_state = trace_read_lock_unwrap!(server_state);
+            let address_space = trace_read_lock_unwrap!(address_space);
+
             let browse_paths = request.browse_paths.as_ref().unwrap();
             let max_browse_paths_per_translate = server_state.max_browse_paths_per_translate();
             if browse_paths.len() > max_browse_paths_per_translate {
                 trace!("Browse paths size {} exceeds max nodes {}", browse_paths.len(), max_browse_paths_per_translate);
-                Ok(self.service_fault(&request.request_header, StatusCode::BadTooManyOperations))
+                self.service_fault(&request.request_header, StatusCode::BadTooManyOperations)
             } else {
                 let results = browse_paths.iter().enumerate().map(|(i, browse_path)| {
                     trace!("Processing browse path {}", i);
@@ -125,7 +119,7 @@ impl ViewService {
                         }
                     } else {
                         // Starting from the node_id, find paths
-                        match relative_path::find_nodes_relative_path(address_space, &node_id, &browse_path.relative_path) {
+                        match relative_path::find_nodes_relative_path(&address_space, &node_id, &browse_path.relative_path) {
                             Err(err) => {
                                 trace!("Browse path result for find nodes returned in error {}", err.name());
                                 BrowsePathResult {
@@ -156,69 +150,67 @@ impl ViewService {
                     }
                 }).collect();
 
-                let response = TranslateBrowsePathsToNodeIdsResponse {
+                TranslateBrowsePathsToNodeIdsResponse {
                     response_header: ResponseHeader::new_good(&request.request_header),
                     results: Some(results),
                     diagnostic_infos: None,
-                };
-
-                Ok(response.into())
+                }.into()
             }
         }
     }
 
-    pub fn register_nodes(&self, server_state: &mut ServerState, session: Arc<RwLock<Session>>, request: &RegisterNodesRequest) -> Result<SupportedMessage, StatusCode> {
+    pub fn register_nodes(&self, server_state: Arc<RwLock<ServerState>>, session: Arc<RwLock<Session>>, request: &RegisterNodesRequest) -> SupportedMessage {
         if is_empty_option_vec!(request.nodes_to_register) {
-            Ok(self.service_fault(&request.request_header, StatusCode::BadNothingToDo))
+            self.service_fault(&request.request_header, StatusCode::BadNothingToDo)
         } else {
+            let mut server_state = trace_write_lock_unwrap!(server_state);
             if let Some(ref mut callback) = server_state.register_nodes_callback {
                 let nodes_to_register = request.nodes_to_register.as_ref().unwrap();
                 match callback.register_nodes(session, &nodes_to_register[..]) {
                     Ok(registered_node_ids) => {
-                        let response = RegisterNodesResponse {
+                        RegisterNodesResponse {
                             response_header: ResponseHeader::new_good(&request.request_header),
                             registered_node_ids: Some(registered_node_ids),
-                        };
-                        Ok(response.into())
+                        }.into()
                     }
                     Err(err) => {
-                        Ok(self.service_fault(&request.request_header, err))
+                        self.service_fault(&request.request_header, err)
                     }
                 }
             } else {
-                Ok(self.service_fault(&request.request_header, StatusCode::BadNodeIdInvalid))
+                self.service_fault(&request.request_header, StatusCode::BadNodeIdInvalid)
             }
         }
     }
 
-    pub fn unregister_nodes(&self, server_state: &mut ServerState, session: Arc<RwLock<Session>>, request: &UnregisterNodesRequest) -> Result<SupportedMessage, StatusCode> {
+    pub fn unregister_nodes(&self, server_state: Arc<RwLock<ServerState>>, session: Arc<RwLock<Session>>, request: &UnregisterNodesRequest) -> SupportedMessage {
         if is_empty_option_vec!(request.nodes_to_unregister) {
-            Ok(self.service_fault(&request.request_header, StatusCode::BadNothingToDo))
+            self.service_fault(&request.request_header, StatusCode::BadNothingToDo)
         } else {
+            let mut server_state = trace_write_lock_unwrap!(server_state);
             if let Some(ref mut callback) = server_state.unregister_nodes_callback {
                 let nodes_to_unregister = request.nodes_to_unregister.as_ref().unwrap();
                 match callback.unregister_nodes(session, &nodes_to_unregister[..]) {
                     Ok(_) => {
-                        let response = UnregisterNodesResponse {
+                        UnregisterNodesResponse {
                             response_header: ResponseHeader::new_good(&request.request_header),
-                        };
-                        Ok(response.into())
+                        }.into()
                     }
                     Err(err) => {
-                        Ok(self.service_fault(&request.request_header, err))
+                        self.service_fault(&request.request_header, err)
                     }
                 }
             } else {
-                Ok(UnregisterNodesResponse {
+                UnregisterNodesResponse {
                     response_header: ResponseHeader::new_good(&request.request_header),
-                }.into())
+                }.into()
             }
         }
     }
 
     fn browse_nodes(session: &mut Session, address_space: &AddressSpace, nodes_to_browse: &[BrowseDescription], max_references_per_node: usize) -> Vec<BrowseResult> {
         nodes_to_browse.iter().map(|node_to_browse| {
-            match Self::browse_node(session, &address_space, 0, node_to_browse, max_references_per_node) {
+            match Self::browse_node(session, address_space, 0, node_to_browse, max_references_per_node) {
                 Ok(browse_result) => browse_result,
                 Err(status_code) => BrowseResult {
                     status_code,
@@ -251,7 +243,7 @@ impl ViewService {
         let (references, inverse_ref_idx) = address_space.find_references_by_direction(&node_to_browse.node_id, node_to_browse.browse_direction, reference_type_id);
 
         let result_mask = BrowseDescriptionResultMask::from_bits_truncate(node_to_browse.result_mask);
-        let node_class_mask = node_to_browse.node_class_mask;
+        let node_class_mask = NodeClassMask::from_bits_truncate(node_to_browse.node_class_mask);
 
         // Construct descriptions for each reference
         let mut reference_descriptions: Vec<ReferenceDescription> = Vec::with_capacity(max_references_per_node);
@@ -272,8 +264,11 @@ impl ViewService {
             let target_node_class = target_node.node_class();
 
             // Skip target nodes not required by the mask
-            if node_class_mask != 0 && node_class_mask & (target_node_class as u32) == 0 {
-                continue;
+            if target_node_class != NodeClass::Unspecified && !node_class_mask.is_empty() {
+                let target_node_class = NodeClassMask::from_bits_truncate(target_node_class as u32);
+                if !node_class_mask.contains(target_node_class) {
+                    continue;
+                }
             }
 
             // Prepare the values to put into the struct according to the result mask

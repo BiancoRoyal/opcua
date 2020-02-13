@@ -2,10 +2,6 @@
 
 use std::sync::{Arc, RwLock};
 
-use opcua_core::{
-    crypto::user_identity,
-    prelude::*,
-};
 use opcua_types::{
     node_ids::ObjectId,
     profiles,
@@ -17,10 +13,14 @@ use opcua_types::{
     status_code::StatusCode,
 };
 
+use opcua_crypto::{user_identity, PrivateKey, SecurityPolicy, X509};
+use opcua_core::prelude::*;
+
 use crate::{
     callbacks::{RegisterNodes, UnregisterNodes},
     config::{ServerConfig, ServerEndpoint},
     diagnostics::ServerDiagnostics,
+    historical::{HistoricalDataProvider, HistoricalEventProvider},
 };
 
 pub(crate) const POLICY_ID_ANONYMOUS: &str = "anonymous";
@@ -83,6 +83,10 @@ pub struct ServerState {
     pub(crate) register_nodes_callback: Option<Box<dyn RegisterNodes + Send + Sync>>,
     /// Callback for unregister nodes
     pub(crate) unregister_nodes_callback: Option<Box<dyn UnregisterNodes + Send + Sync>>,
+    /// Callback for historical data
+    pub(crate) historical_data_provider: Option<Box<dyn HistoricalDataProvider + Send + Sync>>,
+    /// Callback for historical events
+    pub(crate) historical_event_provider: Option<Box<dyn HistoricalEventProvider + Send + Sync>>,
 }
 
 impl ServerState {
@@ -369,6 +373,12 @@ impl ServerState {
         self.unregister_nodes_callback = Some(unregister_nodes_callback);
     }
 
+    /// Returns the decoding limits of the server
+    pub fn decoding_limits(&self) -> DecodingLimits {
+        let config = trace_read_lock_unwrap!(self.config);
+        config.decoding_limits()
+    }
+
     /// Authenticates an anonymous token, i.e. does the endpoint support anonymous access or not
     fn authenticate_anonymous_token(endpoint: &ServerEndpoint, token: &AnonymousIdentityToken) -> Result<String, StatusCode> {
         if token.policy_id.as_ref() != POLICY_ID_ANONYMOUS {
@@ -485,5 +495,13 @@ impl ServerState {
                 Err(StatusCode::BadIdentityTokenInvalid)
             })
         }
+    }
+
+    pub fn set_historical_data_provider(&mut self, historical_data_provider: Box<dyn HistoricalDataProvider + Send + Sync>) {
+        self.historical_data_provider = Some(historical_data_provider);
+    }
+
+    pub fn set_historical_event_provider(&mut self, historical_event_provider: Box<dyn HistoricalEventProvider + Send + Sync>) {
+        self.historical_event_provider = Some(historical_event_provider);
     }
 }

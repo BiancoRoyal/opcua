@@ -1,9 +1,12 @@
 //! Provides functionality to create an address space, find nodes, add nodes, change attributes
 //! and values on nodes.
 
-use std::result::Result;
+use std::{
+    result::Result,
+    sync::{Arc, Mutex},
+};
 
-use opcua_types::{AttributeId, DataValue, NodeId};
+use opcua_types::{AttributeId, DataValue, NodeId, NumericRange, QualifiedName};
 use opcua_types::status_code::StatusCode;
 
 use crate::callbacks::{AttributeGetter, AttributeSetter};
@@ -11,18 +14,22 @@ use crate::callbacks::{AttributeGetter, AttributeSetter};
 pub use self::address_space::AddressSpace;
 
 /// An implementation of attribute getter that can be easily constructed from a mutable function
-pub struct AttrFnGetter<F> where F: FnMut(&NodeId, AttributeId, f64) -> Result<Option<DataValue>, StatusCode> + Send {
+pub struct AttrFnGetter<F> where F: FnMut(&NodeId, AttributeId, NumericRange, &QualifiedName, f64) -> Result<Option<DataValue>, StatusCode> + Send {
     getter: F
 }
 
-impl<F> AttributeGetter for AttrFnGetter<F> where F: FnMut(&NodeId, AttributeId, f64) -> Result<Option<DataValue>, StatusCode> + Send {
-    fn get(&mut self, node_id: &NodeId, attribute_id: AttributeId, max_age: f64) -> Result<Option<DataValue>, StatusCode> {
-        (self.getter)(node_id, attribute_id, max_age)
+impl<F> AttributeGetter for AttrFnGetter<F> where F: FnMut(&NodeId, AttributeId, NumericRange, &QualifiedName, f64) -> Result<Option<DataValue>, StatusCode> + Send {
+    fn get(&mut self, node_id: &NodeId, attribute_id: AttributeId, index_range: NumericRange, data_encoding: &QualifiedName, max_age: f64) -> Result<Option<DataValue>, StatusCode> {
+        (self.getter)(node_id, attribute_id, index_range, data_encoding, max_age)
     }
 }
 
-impl<F> AttrFnGetter<F> where F: FnMut(&NodeId, AttributeId, f64) -> Result<Option<DataValue>, StatusCode> + Send {
+impl<F> AttrFnGetter<F> where F: FnMut(&NodeId, AttributeId, NumericRange, &QualifiedName, f64) -> Result<Option<DataValue>, StatusCode> + Send {
     pub fn new(getter: F) -> AttrFnGetter<F> { AttrFnGetter { getter } }
+
+    pub fn new_boxed(getter: F) -> Arc<Mutex<AttrFnGetter<F>>> {
+        Arc::new(Mutex::new(Self::new(getter)))
+    }
 }
 
 /// An implementation of attribute setter that can be easily constructed using a mutable function
@@ -38,6 +45,10 @@ impl<F> AttributeSetter for AttrFnSetter<F> where F: FnMut(&NodeId, AttributeId,
 
 impl<F> AttrFnSetter<F> where F: FnMut(&NodeId, AttributeId, DataValue) -> Result<(), StatusCode> + Send {
     pub fn new(setter: F) -> AttrFnSetter<F> { AttrFnSetter { setter } }
+
+    pub fn new_boxed(setter: F) -> Arc<Mutex<AttrFnSetter<F>>> {
+        Arc::new(Mutex::new(Self::new(setter)))
+    }
 }
 
 // A macro for creating builders. Builders can be used for more conveniently creating objects,
@@ -286,9 +297,9 @@ bitflags! {
     pub struct AccessLevel: u8 {
         const CURRENT_READ = 1;
         const CURRENT_WRITE = 2;
+        const HISTORY_READ = 4;
+        const HISTORY_WRITE = 8;
         // These can be uncommented if they become used
-        // const HISTORY_READ = 4;
-        // const HISTORY_WRITE = 8;
         // const SEMANTIC_CHANGE = 16;
         // const STATUS_WRITE = 32;
         // const TIMESTAMP_WRITE = 64;
@@ -299,9 +310,9 @@ bitflags! {
     pub struct UserAccessLevel: u8 {
         const CURRENT_READ = 1;
         const CURRENT_WRITE = 2;
+        const HISTORY_READ = 4;
+        const HISTORY_WRITE = 8;
         // These can be uncommented if they become used
-        // const HISTORY_READ = 4;
-        // const HISTORY_WRITE = 8;
         // const STATUS_WRITE = 32;
         // const TIMESTAMP_WRITE = 64;
     }

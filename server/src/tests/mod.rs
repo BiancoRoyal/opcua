@@ -1,5 +1,6 @@
 use std;
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 use chrono;
 use time;
@@ -8,11 +9,11 @@ use opcua_types::{
     *,
     status_code::StatusCode,
 };
-
+use opcua_crypto::*;
 use opcua_core::{
     config::Config,
-    crypto::*,
     comms::secure_channel::SecureChannel,
+    supported_message::SupportedMessage,
 };
 
 use crate::{
@@ -37,13 +38,15 @@ fn make_test_file(filename: &str) -> PathBuf {
     path
 }
 
-fn make_sample_address_space() -> AddressSpace {
-    let mut address_space = AddressSpace::new();
-    add_sample_vars_to_address_space(&mut address_space);
+fn make_sample_address_space() -> Arc<RwLock<AddressSpace>> {
+    let address_space = Arc::new(RwLock::new(AddressSpace::new()));
+    add_sample_vars_to_address_space(address_space.clone());
     address_space
 }
 
-fn add_sample_vars_to_address_space(address_space: &mut AddressSpace) {
+fn add_sample_vars_to_address_space(address_space: Arc<RwLock<AddressSpace>>) {
+    let mut address_space = trace_write_lock_unwrap!(address_space);
+
     // Create a sample folder under objects folder
     let sample_folder_id = address_space.add_folder("Sample", "Sample", &NodeId::objects_folder_id()).unwrap();
 

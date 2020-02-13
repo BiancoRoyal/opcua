@@ -19,17 +19,6 @@ extern crate serde_derive;
 #[cfg(test)]
 extern crate serde_json;
 
-#[macro_export]
-macro_rules! supported_message_as {
-    ($v: expr, $i: ident) => {
-        if let SupportedMessage::$i(value) = $v {
-            *value
-        } else {
-            panic!();
-        }
-    }
-}
-
 ///Contains constants recognized by OPC UA clients and servers to describe various protocols and
 /// profiles used during communication and encryption.
 pub mod profiles {
@@ -55,21 +44,8 @@ pub mod constants {
 
     /// URI supplied for the None security policy
     pub const SECURITY_POLICY_NONE_URI: &str = "http://opcfoundation.org/UA/SecurityPolicy#None";
-    /// URI supplied for the `Basic128Rsa15` security policy
-    pub const SECURITY_POLICY_BASIC_128_RSA_15_URI: &str = "http://opcfoundation.org/UA/SecurityPolicy#Basic128Rsa15";
-    /// URI supplied for the `Basic256` security policy
-    pub const SECURITY_POLICY_BASIC_256_URI: &str = "http://opcfoundation.org/UA/SecurityPolicy#Basic256";
-    /// URI supplied for the `Basic256Sha256` security policy
-    pub const SECURITY_POLICY_BASIC_256_SHA_256_URI: &str = "http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256";
-
     /// String used as shorthand in config files, debug etc.for `None` security policy
     pub const SECURITY_POLICY_NONE: &str = "None";
-    /// String used as shorthand in config files, debug etc.for `Basic128Rsa15` security policy
-    pub const SECURITY_POLICY_BASIC_128_RSA_15: &str = "Basic128Rsa15";
-    /// String used as shorthand in config files, debug etc.for `Basic256` security policy
-    pub const SECURITY_POLICY_BASIC_256: &str = "Basic256";
-    /// String used as shorthand in config files, debug etc.for `Basic256Sha256` security policy
-    pub const SECURITY_POLICY_BASIC_256_SHA_256: &str = "Basic256Sha256";
 }
 
 // Attributes mask bits
@@ -168,6 +144,32 @@ bitflags! {
     }
 }
 
+// Bits that control the reference description coming back from browse()
+bitflags! {
+    pub struct BrowseDescriptionResultMask: u32 {
+        const RESULT_MASK_REFERENCE_TYPE = 1;
+        const RESULT_MASK_IS_FORWARD = 1 << 1;
+        const RESULT_MASK_NODE_CLASS = 1 << 2;
+        const RESULT_MASK_BROWSE_NAME = 1 << 3;
+        const RESULT_MASK_DISPLAY_NAME = 1 << 4;
+        const RESULT_MASK_TYPE_DEFINITION = 1 << 5;
+    }
+}
+
+// Bits for a node class mask
+bitflags! {
+    pub struct NodeClassMask: u32 {
+        const OBJECT = 1;
+        const VARIABLE = 1 << 1;
+        const METHOD = 1 << 2;
+        const OBJECT_TYPE = 1 << 3;
+        const VARIABLE_TYPE = 1 << 4;
+        const REFERENCE_TYPE = 1 << 5;
+        const DATA_TYPE = 1 << 6;
+        const VIEW = 1 << 7;
+    }
+}
+
 mod status_codes;
 
 pub mod encoding;
@@ -187,11 +189,8 @@ pub mod variant;
 pub mod data_types;
 pub mod notification_message;
 pub mod attribute;
-pub mod supported_message;
 pub mod numeric_range;
-pub mod url;
 pub mod argument;
-pub mod tcp_types;
 pub mod service_types;
 pub mod status_code;
 pub mod relative_path;
@@ -216,10 +215,8 @@ pub use crate::{
     variant::*,
     data_types::*,
     attribute::*,
-    supported_message::*,
     service_types::*,
     numeric_range::*,
-    url::*,
     argument::*,
     operand::*,
     request_header::*,

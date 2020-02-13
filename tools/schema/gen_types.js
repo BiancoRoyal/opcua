@@ -5,7 +5,7 @@ let xml2js = require("xml2js");
 let settings = require("./settings");
 let util = require("./util");
 
-let types_xml = `${settings.schema_dir}/Opc.Ua.Types.bsd.xml`;
+let types_xml = `${settings.schema_dir}/Opc.Ua.Types.bsd`;
 
 /// This code parses the OPC UA Binary types definitions and creates a generated .rs type.
 /// Fields are converted to snake case as they are written. Code for serializing the struct is also generated
@@ -19,12 +19,6 @@ let ignored_types = [
     "FourByteNodeId", "TwoByteNodeId", "XmlElement", "Union", "RequestHeader", "ResponseHeader",
     "Node", "InstanceNode", "TypeNode", "ObjectNode", "ObjectTypeNode", "VariableNode", "VariableTypeNode", "ReferenceTypeNode",
     "MethodNode", "ViewNode", "DataTypeNode", "ReferenceNode",
-    // Excluded because they use unimplemented enums, or are used by unimplemented services
-    "ModificationInfo", "HistoryModifiedData", "UpdateDataDetails", "UpdateEventDetails", "UpdateStructureDataDetails", "RedundantServerDataType",
-    "ServerStatusDataType", "AxisInformation", "RegisterServer2Request", "RegisterServer2Response", "HistoryData", "HistoryEvent", "HistoryReadDetails",
-    "HistoryEventFieldList", "HistoryReadRequest", "HistoryReadResponse", "HistoryReadResult", "HistoryReadValueId", "HistoryUpdateDetails",
-    "HistoryUpdateRequest", "HistoryUpdateResponse", "HistoryUpdateResult", "SemanticChangeStructureDataType", "SemanticChangeStructureDataType",
-    "ReadAtTimeDetails", "ReadProcessedDetails"
 ];
 
 let basic_types_import_map = {
@@ -32,6 +26,7 @@ let basic_types_import_map = {
     "string": ["UAString", "XmlElement"],
     "byte_string": ["ByteString"],
     "variant": ["Variant"],
+    "guid": ["Guid"],
     "localized_text": ["LocalizedText"],
     "qualified_name": ["QualifiedName"],
     "diagnostic_info": ["DiagnosticInfo"],
@@ -39,7 +34,14 @@ let basic_types_import_map = {
     "data_types": ["Duration", "UtcTime"],
     "request_header": ["RequestHeader"],
     "response_header": ["ResponseHeader"],
-    "service_types::enums": ["MessageSecurityMode", "MonitoringMode", "TimestampsToReturn", "FilterOperator", "BrowseDirection", "NodeClass", "SecurityTokenRequestType", "ApplicationType", "UserTokenType", "DataChangeTrigger"],
+    "service_types::enums": [
+        "MessageSecurityMode", "MonitoringMode", "TimestampsToReturn", "FilterOperator",
+        "BrowseDirection", "NodeClass", "SecurityTokenRequestType", "ApplicationType", "UserTokenType",
+        "DataChangeTrigger", "HistoryUpdateType", "PerformUpdateType", "ServerState", "AxisScaleEnumeration",
+        "BrokerTransportQualityOfService", "JsonDataSetMessageContentMask", "JsonNetworkMessageContentMask",
+        "DataSetFieldContentMask", "DataSetFieldFlags", "UadpDataSetMessageContentMask", "UadpNetworkMessageContentMask",
+        "OverrideValueHandling", "DataSetOrderingType", "PermissionType", "StructureType", "IdentityCriteriaType",
+    ],
     "node_id": ["NodeId", "ExpandedNodeId"],
     "data_value": ["DataValue"],
     "date_time": ["DateTime"],

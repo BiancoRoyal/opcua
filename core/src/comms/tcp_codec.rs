@@ -10,14 +10,20 @@
 use std::io;
 use std::sync::{Arc, RwLock};
 
-use bytes::{BytesMut, BufMut};
-use tokio_io::codec::{Encoder, Decoder};
+use bytes::{BufMut, BytesMut};
+use tokio_io::codec::{Decoder, Encoder};
 
-use opcua_types::tcp_types::{MessageType, MessageHeader, HelloMessage, AcknowledgeMessage, ErrorMessage, MESSAGE_HEADER_LEN};
-use opcua_types::encoding::{BinaryEncoder, DecodingLimits};
-use opcua_types::status_code::StatusCode;
+use opcua_types::{
+    encoding::{BinaryEncoder, DecodingLimits},
+    status_code::StatusCode,
+};
 
-use crate::comms::message_chunk::MessageChunk;
+use crate::{
+    comms::{
+        message_chunk::MessageChunk,
+        tcp_types::{AcknowledgeMessage, ErrorMessage, HelloMessage, MESSAGE_HEADER_LEN, MessageHeader, MessageType},
+    }
+};
 
 #[derive(Debug)]
 pub enum Message {

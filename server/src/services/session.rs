@@ -1,9 +1,10 @@
-use std::result::Result;
+use std::sync::{Arc, RwLock};
 
 use opcua_types::*;
 use opcua_types::status_code::StatusCode;
+use opcua_core::supported_message::SupportedMessage;
 
-use opcua_core::crypto::{self, SecurityPolicy, CertificateStore, random};
+use opcua_crypto::{self as crypto, SecurityPolicy, CertificateStore, random};
 
 use crate::{
     constants,
@@ -24,7 +25,10 @@ impl SessionService {
         SessionService {}
     }
 
-    pub fn create_session(&self, certificate_store: &CertificateStore, server_state: &mut ServerState, session: &mut Session, request: &CreateSessionRequest) -> Result<SupportedMessage, StatusCode> {
+    pub fn create_session(&self, certificate_store: &CertificateStore, server_state: Arc<RwLock<ServerState>>, session: Arc<RwLock<Session>>, request: &CreateSessionRequest) -> SupportedMessage {
+        let server_state = trace_write_lock_unwrap!(server_state);
+        let mut session = trace_write_lock_unwrap!(session);
+
         debug!("Create session request {:?}", request);
 
         let endpoints = server_state.new_endpoint_descriptions(request.endpoint_url.as_ref());
@@ -50,7 +54,7 @@ impl SessionService {
             // Rejected
             let mut diagnostics = trace_write_lock_unwrap!(server_state.diagnostics);
             diagnostics.on_rejected_session();
-            Ok(self.service_fault(&request.request_header, service_result))
+            self.service_fault(&request.request_header, service_result)
         } else {
             let endpoints = endpoints.unwrap();
 
@@ -79,7 +83,7 @@ impl SessionService {
                 StatusCode::Good
             };
 
-            let response = if service_result.is_bad() {
+            if service_result.is_bad() {
                 self.service_fault(&request.request_header, service_result)
             } else {
                 let session_timeout = if request.requested_session_timeout > constants::MAX_SESSION_TIMEOUT {
@@ -92,7 +96,11 @@ impl SessionService {
 
                 // Calculate a signature (assuming there is a pkey)
                 let server_signature = if let Some(ref pkey) = server_state.server_pkey {
-                    crypto::create_signature_data(pkey, security_policy, &request.client_certificate, &request.client_nonce)?
+                    crypto::create_signature_data(pkey, security_policy, &request.client_certificate, &request.client_nonce)
+                        .unwrap_or_else(|err| {
+                            error!("Cannot create signature data from private key, check log and error {:?}", err);
+                            SignatureData::null()
+                        })
                 } else {
                     SignatureData::null()
                 };
@@ -123,12 +131,13 @@ impl SessionService {
                     server_signature,
                     max_request_message_size,
                 }.into()
-            };
-            Ok(response)
+            }
         }
     }
 
-    pub fn activate_session(&self, server_state: &mut ServerState, session: &mut Session, request: &ActivateSessionRequest) -> Result<SupportedMessage, StatusCode> {
+    pub fn activate_session(&self, server_state: Arc<RwLock<ServerState>>, session: Arc<RwLock<Session>>, request: &ActivateSessionRequest) -> SupportedMessage {
+        let server_state = trace_write_lock_unwrap!(server_state);
+        let mut session = trace_write_lock_unwrap!(session);
         let endpoint_url = session.endpoint_url.as_ref();
 
         let (security_policy, security_mode) = {
@@ -145,7 +154,7 @@ impl SessionService {
         } else if security_policy != SecurityPolicy::None {
             // Crypto see 5.6.3.1 verify the caller is the same caller as create_session by validating
             // signature supplied by the client during the create.
-            Self::verify_client_signature(server_state, session, &request.client_signature)
+            Self::verify_client_signature(&server_state, &session, &request.client_signature)
         } else {
             // No cert checks for no security
             StatusCode::Good
@@ -158,11 +167,10 @@ impl SessionService {
         }
 
         // Authenticate the user identity token
-        let response = if service_result.is_good() {
+        if service_result.is_good() {
             session.activated = true;
             session.session_nonce = server_nonce;
             let diagnostic_infos = None;
-
             ActivateSessionResponse {
                 response_header: ResponseHeader::new_good(&request.request_header),
                 server_nonce: session.session_nonce.clone(),
@@ -172,27 +180,25 @@ impl SessionService {
         } else {
             session.activated = false;
             self.service_fault(&request.request_header, service_result)
-        };
-        Ok(response)
+        }
     }
 
-    pub fn close_session(&self, session: &mut Session, request: &CloseSessionRequest) -> Result<SupportedMessage, StatusCode> {
+    pub fn close_session(&self, session: Arc<RwLock<Session>>, request: &CloseSessionRequest) -> SupportedMessage {
+        let mut session = trace_write_lock_unwrap!(session);
         session.authentication_token = NodeId::null();
         session.user_identity = None;
         session.activated = false;
-        let response = CloseSessionResponse {
+       CloseSessionResponse {
             response_header: ResponseHeader::new_good(&request.request_header),
-        };
-        Ok(response.into())
+        }.into()
     }
 
-    pub fn cancel(&self, _server_state: &mut ServerState, _session: &mut Session, request: &CancelRequest) -> Result<SupportedMessage, StatusCode> {
+    pub fn cancel(&self, _server_state: Arc<RwLock<ServerState>>, _session: Arc<RwLock<Session>>, request: &CancelRequest) -> SupportedMessage {
         // This service call currently does nothing
-        let response = CancelResponse {
+        CancelResponse {
             response_header: ResponseHeader::new_good(&request.request_header),
             cancel_count: 0,
-        };
-        Ok(response.into())
+        }.into()
     }
 
     /// Verifies that the supplied client signature was produced by the session's client certificate

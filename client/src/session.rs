@@ -4,36 +4,40 @@
 //! The session also has async functionality but that is reserved for publish requests on subscriptions
 //! and events.
 use std::{
-    cmp, thread, convert::TryFrom, result::Result, collections::HashSet, str::FromStr,
-    sync::{Arc, Mutex, RwLock, mpsc},
-    time::{Instant, Duration},
+    cmp, collections::HashSet, convert::TryFrom, result::Result, str::FromStr, sync::{Arc, mpsc, Mutex, RwLock},
+    thread,
+    time::{Duration, Instant},
 };
+
 use futures::{
     future, Future,
-    sync::mpsc::UnboundedSender,
     stream::Stream,
+    sync::mpsc::UnboundedSender,
 };
 use tokio;
 use tokio_timer::Interval;
 
 use opcua_core::{
-    comms::secure_channel::{Role, SecureChannel},
-    crypto::{self, CertificateStore, SecurityPolicy, X509, user_identity::make_user_name_identity_token},
+    comms::{
+        secure_channel::{Role, SecureChannel},
+        url::*,
+    },
+    supported_message::SupportedMessage,
 };
-
+use opcua_crypto::{self as crypto, CertificateStore, SecurityPolicy, user_identity::make_user_name_identity_token, X509};
 use opcua_types::{
     *,
-    node_ids::{ObjectId, MethodId},
+    node_ids::{MethodId, ObjectId},
     status_code::StatusCode,
 };
 
 use crate::{
-    callbacks::{OnSubscriptionNotification, OnConnectionStatusChange, OnSessionClosed},
+    callbacks::{OnConnectionStatusChange, OnSessionClosed, OnSubscriptionNotification},
     client,
     comms::tcp_transport::TcpTransport,
     message_queue::MessageQueue,
-    session_retry::{SessionRetryPolicy, Answer},
-    session_state::{SessionState, ConnectionState},
+    session_retry::{Answer, SessionRetryPolicy},
+    session_state::{ConnectionState, SessionState},
     subscription::{self, Subscription},
     subscription_state::SubscriptionState,
     subscription_timer::{SubscriptionTimer, SubscriptionTimerCommand},
@@ -1420,13 +1424,13 @@ impl Session {
     /// [`ReadValueId`]: ./struct.ReadValueId.html
     /// [`DataValue`]: ./struct.DataValue.html
     ///
-    pub fn read(&mut self, nodes_to_read: &[ReadValueId]) -> Result<Option<Vec<DataValue>>, StatusCode> {
+    pub fn read(&mut self, nodes_to_read: &[ReadValueId]) -> Result<Vec<DataValue>, StatusCode> {
         if nodes_to_read.is_empty() {
             // No subscriptions
-            session_error!(self, "read_nodes, was not supplied with any nodes to read");
+            session_error!(self, "read(), was not supplied with any nodes to read");
             Err(StatusCode::BadNothingToDo)
         } else {
-            session_debug!(self, "read_nodes requested to read nodes {:?}", nodes_to_read);
+            session_debug!(self, "read() requested to read nodes {:?}", nodes_to_read);
             let request = ReadRequest {
                 request_header: self.make_request_header(),
                 max_age: 1f64,
@@ -1435,9 +1439,14 @@ impl Session {
             };
             let response = self.send_request(request)?;
             if let SupportedMessage::ReadResponse(response) = response {
-                session_debug!(self, "read_nodes, success");
+                session_debug!(self, "read(), success");
                 crate::process_service_result(&response.response_header)?;
-                Ok(response.results)
+                let results = if let Some(results) = response.results {
+                    results
+                } else {
+                    Vec::new()
+                };
+                Ok(results)
             } else {
                 session_error!(self, "read() value failed");
                 Err(crate::process_unexpected_response(response))
@@ -1445,7 +1454,71 @@ impl Session {
         }
     }
 
-    /// Writes values to nodes by sending a [`WriteRequest`] to the server.
+    /// Reads historical values or events of one or more nodes. The caller is expected to encode a history read
+    /// operation into an extension object which must be one of the following:
+    ///
+    /// * ReadEventDetails
+    /// * ReadRawModifiedDetails
+    /// * ReadProcessedDetails
+    /// * ReadAtTimeDetails
+    ///
+    /// See OPC UA Part 4 - Services 5.10.3 for complete description of the service and error responses.
+    ///
+    /// # Arguments
+    ///
+    /// * `history_read_details` - A history read operation encoded in an `ExtensionObject`.
+    /// * `timestamps_to_return` - Enumeration of which timestamps to return.
+    /// * `release_continuation_points` - Flag indicating whether to release the continuation point for the operation.
+    /// * `nodes_to_read` - The list of `HistoryReadValueId` of the nodes to apply the history read operation to.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<HistoryReadResult>)` - A list of `HistoryReadResult` results corresponding to history read operation.
+    /// * `Err(StatusCode)` - Status code reason for failure.
+    ///
+    pub fn history_read(&mut self, history_read_details: ExtensionObject, timestamps_to_return: TimestampsToReturn, release_continuation_points: bool, nodes_to_read: &[HistoryReadValueId]) -> Result<Vec<HistoryReadResult>, StatusCode> {
+        // Validate the read operation
+        let valid_operation = Self::node_id_is_one_of(&history_read_details.node_id, &[
+            ObjectId::ReadEventDetails_Encoding_DefaultBinary,
+            ObjectId::ReadRawModifiedDetails_Encoding_DefaultBinary,
+            ObjectId::ReadProcessedDetails_Encoding_DefaultBinary,
+            ObjectId::ReadAtTimeDetails_Encoding_DefaultBinary,
+        ]);
+        if !valid_operation {
+            session_error!(self, "history_read(), was called with an invalid history update operation");
+            Err(StatusCode::BadHistoryOperationUnsupported)
+        } else {
+            let request = HistoryReadRequest {
+                request_header: self.make_request_header(),
+                history_read_details,
+                timestamps_to_return,
+                release_continuation_points,
+                nodes_to_read: if nodes_to_read.is_empty() {
+                    None
+                } else {
+                    Some(nodes_to_read.to_vec())
+                },
+            };
+            session_debug!(self, "history_read() requested to read nodes {:?}", nodes_to_read);
+            let response = self.send_request(request)?;
+            if let SupportedMessage::HistoryReadResponse(response) = response {
+                session_debug!(self, "history_read(), success");
+                crate::process_service_result(&response.response_header)?;
+                let results = if let Some(results) = response.results {
+                    results
+                } else {
+                    Vec::new()
+                };
+                Ok(results)
+            } else {
+                session_error!(self, "history_read() value failed");
+                Err(crate::process_unexpected_response(response))
+            }
+        }
+    }
+
+    /// Writes values to nodes by sending a [`WriteRequest`] to the server. Note that some servers may reject DataValues
+    /// containing source or server timestamps.
     ///
     /// See OPC UA Part 4 - Services 5.10.4 for complete description of the service and error responses.
     ///
@@ -1464,7 +1537,7 @@ impl Session {
     pub fn write(&mut self, nodes_to_write: &[WriteValue]) -> Result<Option<Vec<StatusCode>>, StatusCode> {
         if nodes_to_write.is_empty() {
             // No subscriptions
-            session_error!(self, "write_value() was not supplied with any nodes to write");
+            session_error!(self, "write() was not supplied with any nodes to write");
             Err(StatusCode::BadNothingToDo)
         } else {
             let request = WriteRequest {
@@ -1473,12 +1546,75 @@ impl Session {
             };
             let response = self.send_request(request)?;
             if let SupportedMessage::WriteResponse(response) = response {
-                session_debug!(self, "write_value, success");
+                session_debug!(self, "write(), success");
                 crate::process_service_result(&response.response_header)?;
                 Ok(response.results)
             } else {
-                session_error!(self, "write_value failed {:?}", response);
+                session_error!(self, "write() failed {:?}", response);
                 Err(crate::process_unexpected_response(response))
+            }
+        }
+    }
+
+    /// Updates historical values. The caller is expected to encode history update operations into
+    /// extension objects which must be one of the following:
+    ///
+    /// * UpdateDataDetails
+    /// * UpdateStructureDataDetails
+    /// * UpdateEventDetails
+    /// * DeleteRawModifiedDetails
+    /// * DeleteAtTimeDetails
+    /// * DeleteEventDetails
+    ///
+    /// See OPC UA Part 4 - Services 5.10.5 for complete description of the service and error responses.
+    ///
+    /// # Arguments
+    ///
+    /// * `history_update_details` - A list of history update operations each encoded as an `ExtensionObject`.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<HistoryUpdateResult>)` - A list of `HistoryUpdateResult` results corresponding to history update operation.
+    /// * `Err(StatusCode)` - Status code reason for failure.
+    ///
+    pub fn history_update(&mut self, history_update_details: &[ExtensionObject]) -> Result<Vec<HistoryUpdateResult>, StatusCode> {
+        if history_update_details.is_empty() {
+            // No subscriptions
+            session_error!(self, "history_update(), was not supplied with any detail to update");
+            Err(StatusCode::BadNothingToDo)
+        } else {
+            let valid_operation = !history_update_details.iter().any(|h| {
+                !Self::node_id_is_one_of(&h.node_id, &[
+                    ObjectId::UpdateDataDetails_Encoding_DefaultBinary,
+                    ObjectId::UpdateStructureDataDetails_Encoding_DefaultBinary,
+                    ObjectId::UpdateEventDetails_Encoding_DefaultBinary,
+                    ObjectId::DeleteRawModifiedDetails_Encoding_DefaultBinary,
+                    ObjectId::DeleteAtTimeDetails_Encoding_DefaultBinary,
+                    ObjectId::DeleteEventDetails_Encoding_DefaultBinary
+                ])
+            });
+            if !valid_operation {
+                session_error!(self, "history_update(), was called with an invalid history update operation");
+                Err(StatusCode::BadHistoryOperationUnsupported)
+            } else {
+                let request = HistoryUpdateRequest {
+                    request_header: self.make_request_header(),
+                    history_update_details: Some(history_update_details.to_vec()),
+                };
+                let response = self.send_request(request)?;
+                if let SupportedMessage::HistoryUpdateResponse(response) = response {
+                    session_debug!(self, "history_update(), success");
+                    crate::process_service_result(&response.response_header)?;
+                    let results = if let Some(results) = response.results {
+                        results
+                    } else {
+                        Vec::new()
+                    };
+                    Ok(results)
+                } else {
+                    session_error!(self, "history_update() failed {:?}", response);
+                    Err(crate::process_unexpected_response(response))
+                }
             }
         }
     }
@@ -1496,7 +1632,6 @@ impl Session {
     /// * `method` - The method to call. Note this function takes anything that can be turned into
     ///   a [`CallMethodRequest`] which includes a (`NodeId`, `NodeId`, `Option<Vec<Variant>>`)
     ///   which refers to the object id, method id, and input arguments respectively.
-    /// * `items_to_delete` - List of Server-assigned ids for the MonitoredItems to be deleted.
     ///
     /// # Returns
     ///
@@ -1508,7 +1643,7 @@ impl Session {
     /// [`CallMethodResult`]: ./struct.CallMethodResult.html
     ///
     pub fn call<T>(&mut self, method: T) -> Result<CallMethodResult, StatusCode> where T: Into<CallMethodRequest> {
-        session_debug!(self, "call_method");
+        session_debug!(self, "call()");
         let methods_to_call = Some(vec![method.into()]);
         let request = CallRequest {
             request_header: self.make_request_header(),
@@ -1518,13 +1653,13 @@ impl Session {
         if let SupportedMessage::CallResponse(response) = response {
             if let Some(mut results) = response.results {
                 if results.len() != 1 {
-                    session_error!(self, "call_method, expecting a result from the call to the server, got {} results", results.len());
+                    session_error!(self, "call(), expecting a result from the call to the server, got {} results", results.len());
                     Err(StatusCode::BadUnexpectedError)
                 } else {
                     Ok(results.remove(0))
                 }
             } else {
-                session_error!(self, "call_method, expecting a result from the call to the server, got nothing");
+                session_error!(self, "call(), expecting a result from the call to the server, got nothing");
                 Err(StatusCode::BadUnexpectedError)
             }
         } else {
@@ -2251,9 +2386,9 @@ impl Session {
     fn user_identity_token(&self, server_cert: &Option<X509>, server_nonce: &[u8]) -> Result<(ExtensionObject, SignatureData), StatusCode> {
         let user_identity_token = &self.session_info.user_identity_token;
         let user_token_type = match user_identity_token {
-            &client::IdentityToken::Anonymous => UserTokenType::Anonymous,
-            &client::IdentityToken::UserName(_, _) => UserTokenType::UserName,
-            &client::IdentityToken::X509(_, _) => UserTokenType::Certificate,
+            client::IdentityToken::Anonymous => UserTokenType::Anonymous,
+            client::IdentityToken::UserName(_, _) => UserTokenType::UserName,
+            client::IdentityToken::X509(_, _) => UserTokenType::Certificate,
         };
 
         let endpoint = &self.session_info.endpoint;
@@ -2278,20 +2413,20 @@ impl Session {
                     Err(StatusCode::BadSecurityPolicyRejected)
                 } else {
                     match user_identity_token {
-                        &client::IdentityToken::Anonymous => {
+                        client::IdentityToken::Anonymous => {
                             let identity_token = AnonymousIdentityToken {
                                 policy_id: policy.policy_id.clone(),
                             };
                             let identity_token = ExtensionObject::from_encodable(ObjectId::AnonymousIdentityToken_Encoding_DefaultBinary, &identity_token);
                             Ok((identity_token, SignatureData::null()))
                         }
-                        &client::IdentityToken::UserName(ref user, ref pass) => {
+                        client::IdentityToken::UserName(ref user, ref pass) => {
                             let secure_channel = trace_read_lock_unwrap!(self.secure_channel);
                             let identity_token = self.make_user_name_identity_token(&secure_channel, policy, user, pass)?;
                             let identity_token = ExtensionObject::from_encodable(ObjectId::UserNameIdentityToken_Encoding_DefaultBinary, &identity_token);
                             Ok((identity_token, SignatureData::null()))
                         }
-                        &client::IdentityToken::X509(ref cert_path, ref private_key_path) => {
+                        client::IdentityToken::X509(ref cert_path, ref private_key_path) => {
                             if let Some(ref server_cert) = server_cert {
                                 // The cert will be supplied to the server along with a signature to prove we have the private key to go with the cert
                                 let certificate_data = CertificateStore::read_cert(cert_path).map_err(|e| {
@@ -2407,7 +2542,7 @@ impl Session {
                 // Terminate timer if
                 if service_result == StatusCode::BadTooManyPublishRequests {
                     // Turn off publish requests until server says otherwise
-                    wait_for_publish_response = false;
+                    wait_for_publish_response = true;
                 }
             }
             _ => {
@@ -2420,5 +2555,13 @@ impl Session {
             let mut session_state = trace_write_lock_unwrap!(self.session_state);
             session_state.set_wait_for_publish_response(wait_for_publish_response);
         }
+    }
+
+    /// Test if the supplied node id matches one of the supplied object ids. i.e. it must be in namespace 0,
+    /// and have a numeric value that matches the scalar value of the supplied enums.
+    pub(crate) fn node_id_is_one_of(node_id: &NodeId, object_ids: &[ObjectId]) -> bool {
+        node_id.as_object_id()
+            .map(|object_id| object_ids.iter().any(|v| object_id == *v))
+            .unwrap_or(false)
     }
 }

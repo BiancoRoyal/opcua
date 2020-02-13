@@ -3,20 +3,20 @@
 use std;
 use std::io::Cursor;
 
+use opcua_crypto::SecurityPolicy;
 use opcua_types::{
     encoding::BinaryEncoder,
     node_id::NodeId,
     node_ids::ObjectId,
     status_code::StatusCode,
-    supported_message::SupportedMessage,
 };
 
 use crate::{
     comms::{
-        message_chunk::{MessageIsFinalType, MessageChunk, MessageChunkType},
+        message_chunk::{MessageChunk, MessageChunkType, MessageIsFinalType},
         secure_channel::SecureChannel,
     },
-    crypto::SecurityPolicy,
+    supported_message::SupportedMessage,
 };
 
 /// The Chunker is responsible for turning messages to chunks and chunks into messages.
@@ -25,7 +25,7 @@ pub struct Chunker;
 impl Chunker {
     /// Tests what kind of chunk type is used for the supported message.
     fn message_type(message: &SupportedMessage) -> MessageChunkType {
-        match *message {
+        match message {
             SupportedMessage::OpenSecureChannelRequest(_) | SupportedMessage::OpenSecureChannelResponse(_) => MessageChunkType::OpenSecureChannel,
             SupportedMessage::CloseSecureChannelRequest(_) | SupportedMessage::CloseSecureChannelResponse(_) => MessageChunkType::CloseSecureChannel,
             _ => MessageChunkType::Message

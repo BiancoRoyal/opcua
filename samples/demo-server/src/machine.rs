@@ -1,12 +1,10 @@
-use std::sync::{Arc, atomic::{AtomicU16, AtomicU32, Ordering}};
-
 use chrono;
-use rand;
-
 use opcua_server::{
     events::event::*,
     prelude::*,
 };
+use rand;
+use std::sync::{Arc, atomic::{AtomicU16, AtomicU32, Ordering}};
 
 pub fn add_machinery(server: &mut Server) {
     let address_space = server.address_space();
@@ -84,10 +82,10 @@ fn add_machine(address_space: &mut AddressSpace, folder_id: NodeId, name: &str, 
     VariableBuilder::new(&counter_id, "Counter", "Counter")
         .property_of(machine_id.clone())
         .has_type_definition(VariableTypeId::PropertyType)
-        .value_getter(move |_, _, _| -> Result<Option<DataValue>, StatusCode> {
+        .value_getter(AttrFnGetter::new_boxed(move |_, _, _, _, _| -> Result<Option<DataValue>, StatusCode> {
             let value = counter.load(Ordering::Relaxed);
             Ok(Some(DataValue::new(value)))
-        })
+        }))
         .insert(address_space);
 
     machine_id
@@ -100,16 +98,18 @@ pub struct MachineCycledEventType {
 impl Event for MachineCycledEventType {
     type Err = ();
 
-    fn event_type_id() -> NodeId {
-        NodeId::new(DEMO_SERVER_NS_IDX, "MachineCycledEventId")
-    }
-
     fn is_valid(&self) -> bool {
         self.base.is_valid()
     }
 
     fn raise(self, address_space: &mut AddressSpace) -> Result<NodeId, Self::Err> {
         self.base.raise(address_space)
+    }
+}
+
+impl MachineCycledEventType {
+    pub fn event_type_id() -> NodeId {
+        NodeId::new(DEMO_SERVER_NS_IDX, "MachineCycledEventId")
     }
 }
 
@@ -124,11 +124,12 @@ impl MachineCycledEventType {
               T: Into<LocalizedText>,
               U: Into<NodeId>,
               V: Into<NodeId> {
+        let event_type_id = MachineCycledEventType::event_type_id();
         let mut event = MachineCycledEventType {
-            base: BaseEventType::new(node_id, browse_name, display_name, parent_node, source_node, time)
+            base: BaseEventType::new(node_id, event_type_id, browse_name, display_name, parent_node, time)
+                .source_node(source_node)
         };
         event.base.source_name = UAString::from(machine_name);
-        event.base.event_type = MachineCycledEventType::event_type_id();
         event.base.message = LocalizedText::from(format!("A machine cycled event from machine {}", event.base.source_node));
         event.base.severity = rand::random::<u16>() % 999u16 + 1u16;
         event

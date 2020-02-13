@@ -1,9 +1,9 @@
 use std::{
+    path::PathBuf,
     sync::{
         Arc, atomic::{AtomicUsize, Ordering}, mpsc, mpsc::channel, Mutex,
         RwLock,
     },
-    path::PathBuf,
     thread, time,
 };
 
@@ -37,7 +37,7 @@ fn next_port_offset() -> u16 {
 
 pub fn hostname() -> String {
     // To avoid certificate trouble, use the computer's own name for the endpoint
-    let mut names = opcua_core::crypto::X509Data::computer_hostnames();
+    let mut names = opcua_crypto::X509Data::computer_hostnames();
     if names.is_empty() { "localhost".to_string() } else { names.remove(0) }
 }
 
@@ -144,7 +144,7 @@ pub fn new_server(port: u16) -> Server {
 
         // Register a getter for the variable
         if let Some(ref mut v) = address_space.find_variable_mut(v1_node.clone()) {
-            let getter = AttrFnGetter::new(move |_, _, _| -> Result<Option<DataValue>, StatusCode> {
+            let getter = AttrFnGetter::new(move |_, _, _, _, _| -> Result<Option<DataValue>, StatusCode> {
                 Ok(Some(DataValue::new(100)))
             });
             v.set_value_getter(Arc::new(Mutex::new(getter)));
@@ -161,6 +161,7 @@ pub fn new_server(port: u16) -> Server {
             VariableBuilder::new(&node_id, &name, &name)
                 .data_type(DataTypeId::Int32)
                 .value(0i32)
+                .writable()
                 .organized_by(&folder_id)
                 .insert(&mut address_space);
         });
@@ -366,7 +367,7 @@ pub fn regular_client_test<T>(client_endpoint: T, identity_token: IdentityToken,
     // Read the variable
     let mut values = {
         let read_nodes = vec![ReadValueId::from(v1_node_id())];
-        session.read(&read_nodes).unwrap().unwrap()
+        session.read(&read_nodes).unwrap()
     };
     assert_eq!(values.len(), 1);
 

@@ -6,7 +6,7 @@ use crate::services::discovery::DiscoveryService;
 #[test]
 fn get_endpoints() {
     let st = ServiceTest::new();
-    let (mut server_state, _) = st.get_server_state_and_session();
+    let (server_state, _) = st.get_server_state_and_session();
 
     let ds = DiscoveryService::new();
 
@@ -18,9 +18,8 @@ fn get_endpoints() {
             profile_uris: None,
         };
 
-        let result = ds.get_endpoints(&mut server_state, &request);
-        assert!(result.is_ok());
-        let result = supported_message_as!(result.unwrap(), GetEndpointsResponse);
+        let result = ds.get_endpoints(server_state, &request);
+        let result = supported_message_as!(result, GetEndpointsResponse);
 
         // Verify endpoints
         let endpoints = result.endpoints.unwrap();
@@ -33,7 +32,7 @@ fn get_endpoints() {
 #[test]
 fn discovery_test() {
     let st = ServiceTest::new();
-    let (mut server_state, _) = st.get_server_state_and_session();
+    let (server_state, _) = st.get_server_state_and_session();
 
     let ds = DiscoveryService::new();
 
@@ -45,9 +44,8 @@ fn discovery_test() {
             profile_uris: None,
         };
 
-        let result = ds.get_endpoints(&mut server_state, &request);
-        assert!(result.is_ok());
-        let result = supported_message_as!(result.unwrap(), GetEndpointsResponse);
+        let result = ds.get_endpoints(server_state.clone(), &request);
+        let result = supported_message_as!(result, GetEndpointsResponse);
 
         // Verify endpoints
         let endpoints = result.endpoints.unwrap();
@@ -64,9 +62,8 @@ fn discovery_test() {
             locale_ids: None,
             profile_uris: Some(profile_uris),
         };
-        let result = ds.get_endpoints(&mut server_state, &request);
-        assert!(result.is_ok());
-        let result = supported_message_as!(result.unwrap(), GetEndpointsResponse);
+        let result = ds.get_endpoints(server_state.clone(), &request);
+        let result = supported_message_as!(result, GetEndpointsResponse);
         assert!(result.endpoints.is_none());
 
         // Enter the binary transport profile and expect the endpoints
@@ -77,9 +74,8 @@ fn discovery_test() {
             locale_ids: None,
             profile_uris: Some(profile_uris),
         };
-        let result = ds.get_endpoints(&mut server_state, &request);
-        assert!(result.is_ok());
-        let result = supported_message_as!(result.unwrap(), GetEndpointsResponse);
+        let result = ds.get_endpoints(server_state.clone(), &request);
+        let result = supported_message_as!(result, GetEndpointsResponse);
         let endpoints = result.endpoints.unwrap();
         assert!(!endpoints.is_empty())
     }
