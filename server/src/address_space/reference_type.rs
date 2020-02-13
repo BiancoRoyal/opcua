@@ -1,7 +1,13 @@
+//! Contains the implementation of `ReferenceType` and `ReferenceTypeBuilder`.
+
 use opcua_types::service_types::ReferenceTypeAttributes;
 
-use crate::address_space::{base::Base, node::Node, node::NodeAttributes};
+use crate::address_space::{base::Base, node::NodeBase, node::Node};
 
+node_builder_impl!(ReferenceTypeBuilder, ReferenceType);
+node_builder_impl_subtype!(ReferenceTypeBuilder);
+
+/// A `ReferenceType` is a type of node within the `AddressSpace`.
 #[derive(Debug)]
 pub struct ReferenceType {
     base: Base,
@@ -10,57 +16,56 @@ pub struct ReferenceType {
     inverse_name: Option<LocalizedText>,
 }
 
-node_impl!(ReferenceType);
+impl Default for ReferenceType {
+    fn default() -> Self {
+        Self {
+            base: Base::new(NodeClass::VariableType, &NodeId::null(), "", ""),
+            symmetric: false,
+            is_abstract: false,
+            inverse_name: None,
+        }
+    }
+}
 
-impl NodeAttributes for ReferenceType {
-    fn get_attribute(&self, attribute_id: AttributeId, max_age: f64) -> Option<DataValue> {
-        self.base.get_attribute(attribute_id, max_age).or_else(|| {
-            match attribute_id {
-                AttributeId::Symmetric => Some(Variant::from(self.symmetric())),
-                AttributeId::IsAbstract => Some(Variant::from(self.is_abstract())),
-                AttributeId::InverseName => {
-                    if let Some(v) = self.inverse_name() {
-                        Some(Variant::from(v))
-                    } else {
-                        None
-                    }
-                }
-                _ => None
-            }.map(|v| v.into())
-        })
+node_base_impl!(ReferenceType);
+
+impl Node for ReferenceType {
+    fn get_attribute_max_age(&self, attribute_id: AttributeId, max_age: f64) -> Option<DataValue> {
+        match attribute_id {
+            AttributeId::Symmetric => Some(Variant::from(self.symmetric()).into()),
+            AttributeId::IsAbstract => Some(Variant::from(self.is_abstract()).into()),
+            AttributeId::InverseName => self.inverse_name().map(|v| Variant::from(v).into()),
+            _ => self.base.get_attribute_max_age(attribute_id, max_age)
+        }
     }
 
     fn set_attribute(&mut self, attribute_id: AttributeId, value: Variant) -> Result<(), StatusCode> {
-        if let Some(value) = self.base.set_attribute(attribute_id, value)? {
-            match attribute_id {
-                AttributeId::Symmetric => {
-                    if let Variant::Boolean(v) = value {
-                        self.symmetric = v;
-                        Ok(())
-                    } else {
-                        Err(StatusCode::BadTypeMismatch)
-                    }
+        match attribute_id {
+            AttributeId::Symmetric => {
+                if let Variant::Boolean(v) = value {
+                    self.symmetric = v;
+                    Ok(())
+                } else {
+                    Err(StatusCode::BadTypeMismatch)
                 }
-                AttributeId::IsAbstract => {
-                    if let Variant::Boolean(v) = value {
-                        self.is_abstract = v;
-                        Ok(())
-                    } else {
-                        Err(StatusCode::BadTypeMismatch)
-                    }
-                }
-                AttributeId::InverseName => {
-                    if let Variant::LocalizedText(v) = value {
-                        self.inverse_name = Some(*v);
-                        Ok(())
-                    } else {
-                        Err(StatusCode::BadTypeMismatch)
-                    }
-                }
-                _ => Err(StatusCode::BadAttributeIdInvalid)
             }
-        } else {
-            Ok(())
+            AttributeId::IsAbstract => {
+                if let Variant::Boolean(v) = value {
+                    self.is_abstract = v;
+                    Ok(())
+                } else {
+                    Err(StatusCode::BadTypeMismatch)
+                }
+            }
+            AttributeId::InverseName => {
+                if let Variant::LocalizedText(v) = value {
+                    self.inverse_name = Some(*v);
+                    Ok(())
+                } else {
+                    Err(StatusCode::BadTypeMismatch)
+                }
+            }
+            _ => self.base.set_attribute(attribute_id, value)
         }
     }
 }
@@ -108,6 +113,10 @@ impl ReferenceType {
             error!("ReferenceType cannot be created from attributes - missing mandatory values");
             Err(())
         }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.base.is_valid()
     }
 
     pub fn symmetric(&self) -> bool {

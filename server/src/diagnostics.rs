@@ -1,13 +1,15 @@
 //! Provides diagnostics structures and functions for gathering information about the running
 //! state of a server.
-use opcua_client::prelude::ServerDiagnosticsSummaryDataType;
+use opcua_types::service_types::ServerDiagnosticsSummaryDataType;
+
+use opcua_core::RUNTIME;
 
 use crate::{
     subscriptions::subscription::Subscription,
     session::Session,
 };
 
-/// Structure that captures diagnostics information for the server
+/// Structure that captures di                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          agnostics information for the server
 #[derive(Clone, Serialize, Debug)]
 pub struct ServerDiagnostics {
     /// This is a live summary of the server diagnostics
@@ -117,4 +119,3 @@ impl ServerDiagnostics {
     }
     */
 }
-

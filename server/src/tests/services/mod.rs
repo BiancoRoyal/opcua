@@ -57,7 +57,7 @@ fn var_node_id(idx: usize) -> NodeId { NodeId::new(1, var_name(idx)) }
 
 fn add_many_vars_to_address_space(address_space: &mut AddressSpace, vars_to_add: usize) -> (NodeId, Vec<NodeId>) {
     // Create a sample folder under objects folder
-    let sample_folder_id = address_space.add_folder("Many Vars", "Many Vars", &AddressSpace::objects_folder_id()).unwrap();
+    let sample_folder_id = address_space.add_folder("Many Vars", "Many Vars", &NodeId::objects_folder_id()).unwrap();
 
     // Add as a bunch of sequential vars to the folder
     let vars: Vec<Variable> = (0..vars_to_add).map(|i| {
@@ -90,7 +90,7 @@ fn do_subscription_service_test<T>(f: T)
 /// Creates a blank subscription request
 fn create_subscription_request(max_keep_alive_count: u32, lifetime_count: u32) -> CreateSubscriptionRequest {
     CreateSubscriptionRequest {
-        request_header: RequestHeader::new(&NodeId::null(), &DateTime::now(), 1),
+        request_header: RequestHeader::dummy(),
         requested_publishing_interval: 100f64,
         requested_lifetime_count: lifetime_count,
         requested_max_keep_alive_count: max_keep_alive_count,
@@ -101,9 +101,9 @@ fn create_subscription_request(max_keep_alive_count: u32, lifetime_count: u32) -
 }
 
 /// Creates a monitored item request
-fn create_monitored_items_request<T>(subscription_id: u32, mut node_id: Vec<T>) -> CreateMonitoredItemsRequest
+fn create_monitored_items_request<T>(subscription_id: u32, node_id: Vec<T>) -> CreateMonitoredItemsRequest
     where T: Into<NodeId> {
-    let items_to_create = Some(node_id.drain(..)
+    let items_to_create = Some(node_id.into_iter()
         .enumerate()
         .map(|i| {
             let node_id: NodeId = i.1.into();
@@ -121,7 +121,7 @@ fn create_monitored_items_request<T>(subscription_id: u32, mut node_id: Vec<T>) 
         })
         .collect::<Vec<_>>());
     CreateMonitoredItemsRequest {
-        request_header: RequestHeader::new(&NodeId::null(), &DateTime::now(), 1),
+        request_header: RequestHeader::dummy(),
         subscription_id,
         timestamps_to_return: TimestampsToReturn::Both,
         items_to_create,

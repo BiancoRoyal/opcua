@@ -4,7 +4,7 @@ use time;
 
 use opcua_types::{
     *,
-    service_types::{NotificationMessage, PublishRequest, PublishResponse, ResponseHeader, ServiceFault},
+    service_types::{NotificationMessage, PublishRequest, PublishResponse, ServiceFault},
     status_code::StatusCode,
 };
 
@@ -118,29 +118,25 @@ impl Subscriptions {
     /// If the queue is full this call will pop the oldest and generate a service fault
     /// for that before pushing the new one.
     pub(crate) fn enqueue_publish_request(&mut self, now: &DateTimeUtc, request_id: u32, request: PublishRequest, address_space: &AddressSpace) -> Result<(), StatusCode> {
-        // Check if we have too many requests already
+        // Check if we have too  requests waiting already
         let max_publish_requests = self.max_publish_requests();
         if self.publish_request_queue.len() >= max_publish_requests {
+            // Tick to trigger publish, maybe remove a request to make space for new one
+            let _ = self.tick(now, address_space, TickReason::ReceivePublishRequest);
+        }
+
+        // Enqueue request or return error
+        if self.publish_request_queue.len() >= max_publish_requests {
             error!("Too many publish requests {} for capacity {}", self.publish_request_queue.len(), max_publish_requests);
-            // Dequeue oldest publish requests until queue has capacity for at least one more
-            let remove_count = self.publish_request_queue.len() - max_publish_requests + 1;
-            debug!("Removing {} publish requests", remove_count);
-            for _ in 0..remove_count {
-                let _ = self.publish_request_queue.pop_back();
-            }
             Err(StatusCode::BadTooManyPublishRequests)
         } else {
-            // Clear all acknowledged items here
-            // Acknowledge results
-            let results = self.process_subscription_acknowledgements(&request);
-
             // Add to the front of the queue - older items are popped from the back
+            let results = self.process_subscription_acknowledgements(&request);
             self.publish_request_queue.push_front(PublishRequestEntry {
                 request_id,
                 request,
                 results,
             });
-
             // Tick to trigger publish
             self.tick(now, address_space, TickReason::ReceivePublishRequest)
         }
@@ -304,10 +300,10 @@ impl Subscriptions {
                     let subscription_id = subscription_acknowledgement.subscription_id;
                     let sequence_number = subscription_acknowledgement.sequence_number;
                     // Check the subscription id exists
-                    if self.subscriptions.get(&subscription_id).is_some() {
+                    if self.subscriptions.contains_key(&subscription_id) {
                         // Clear notification by its sequence number
                         if self.retransmission_queue.remove(&(subscription_id, sequence_number)).is_some() {
-                            debug!("Removing subscription {} sequence number {} from retransmission queue", subscription_id, sequence_number);
+                            trace!("Removing subscription {} sequence number {} from retransmission queue", subscription_id, sequence_number);
                             StatusCode::Good
                         } else {
                             error!("Cannot find acknowledged notification with sequence number {}", sequence_number);
@@ -329,7 +325,7 @@ impl Subscriptions {
     /// subscription id
     fn more_notifications(&self, subscription_id: u32) -> bool {
         // At least one match means more notifications
-        self.transmission_queue.iter().find(|v| v.0 == subscription_id).is_some()
+        self.transmission_queue.iter().any(|v| v.0 == subscription_id)
     }
 
     /// Returns the array of available sequence numbers in the retransmission queue for the specified subscription
@@ -367,7 +363,7 @@ impl Subscriptions {
     }
 
     /// Finds a notification message in the retransmission queue matching the supplied subscription id
-    /// and sequence number. Returns `BadNoSubscription` or `BadMessageNotAvailable` if a matching
+    /// and sequence number. Returns `BadSubscriptionIdInvalid` or `BadMessageNotAvailable` if a matching
     /// notification is not found.
     pub fn find_notification_message(&self, subscription_id: u32, sequence_number: u32) -> Result<NotificationMessage, StatusCode> {
         // Look for the subscription
@@ -379,30 +375,37 @@ impl Subscriptions {
                 Err(StatusCode::BadMessageNotAvailable)
             }
         } else {
-            Err(StatusCode::BadNoSubscription)
+            Err(StatusCode::BadSubscriptionIdInvalid)
         }
     }
 
-    /// Purges notifications waiting for acknowledgement if they exceed the max retransmission queue
-    /// size.
+    fn remove_notifications(&mut self, sequence_nrs_to_remove: &[(u32, u32)]) {
+        sequence_nrs_to_remove.into_iter().for_each(|n| {
+            trace!("Removing notification for subscription {}, sequence nr {}", n.0, n.1);
+            let _ = self.retransmission_queue.remove(&n);
+        });
+    }
+
+    /// Purges notifications waiting for acknowledgement if they are stale or the max permissible
+    /// is exceeded.
     fn remove_old_unacknowledged_notifications(&mut self) {
+        // Strip out notifications for subscriptions that no longer exist
+        let sequence_nrs_to_remove = self.retransmission_queue.iter()
+            .filter(|(k, _)| !self.subscriptions.contains_key(&k.0))
+            .map(|(k, _)| *k)
+            .collect::<Vec<_>>();
+        self.remove_notifications(&sequence_nrs_to_remove);
+
+        // Compare number of items in retransmission queue to max permissible and remove the older
+        // notifications.
         let max_retransmission_queue = self.max_publish_requests() * 2;
         if self.retransmission_queue.len() > max_retransmission_queue {
-            // Compare number of items in retransmission queue to max permissible and remove the older
-            // notifications.
             let remove_count = self.retransmission_queue.len() - max_retransmission_queue;
-
-            // Iterate the map, taking the sequence nr of each notification to remove
             let sequence_nrs_to_remove = self.retransmission_queue.iter()
                 .take(remove_count)
-                .map(|v| *v.0)
+                .map(|(k, _)| *k)
                 .collect::<Vec<_>>();
-
-            // Remove in order of insertion, i.e. oldest first
-            sequence_nrs_to_remove.iter()
-                .for_each(|n| {
-                    self.retransmission_queue.remove(n);
-                });
+            self.remove_notifications(&sequence_nrs_to_remove);
         }
     }
 }

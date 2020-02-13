@@ -19,6 +19,7 @@ use crate::{
         pkey::{PrivateKey, PublicKey, KeySize},
         SecurityPolicy,
         x509::X509,
+        random,
     },
 };
 
@@ -231,12 +232,12 @@ impl SecureChannel {
                 let asymmetric_security_header = if self.security_policy == SecurityPolicy::None {
                     trace!("AsymmetricSecurityHeader security policy none");
                     AsymmetricSecurityHeader::none()
-                } else if self.remote_cert.is_none() {
-                    trace!("AsymmetricSecurityHeader security policy none/2");
-                    AsymmetricSecurityHeader::none()
                 } else {
-                    let receiver_certificate_thumbprint = self.remote_cert.as_ref().unwrap().thumbprint().as_byte_string();
-                    trace!("AsymmetricSecurityHeader security policy from remote");
+                    let receiver_certificate_thumbprint = if let Some(ref remote_cert) = self.remote_cert {
+                        remote_cert.thumbprint().as_byte_string()
+                    } else {
+                        ByteString::null()
+                    };
                     AsymmetricSecurityHeader::new(self.security_policy, self.cert.as_ref().unwrap(), receiver_certificate_thumbprint)
                 };
                 debug!("AsymmetricSecurityHeader = {:?}", asymmetric_security_header);
@@ -253,10 +254,8 @@ impl SecureChannel {
     /// Creates a nonce for the connection. The nonce should be the same size as the symmetric key
     pub fn create_random_nonce(&mut self) {
         if self.security_policy != SecurityPolicy::None && (self.security_mode == MessageSecurityMode::Sign || self.security_mode == MessageSecurityMode::SignAndEncrypt) {
-            use ring::rand::{SystemRandom, SecureRandom};
-            let rng = SystemRandom::new();
             self.local_nonce = vec![0u8; self.security_policy.symmetric_key_size()];
-            let _ = rng.fill(&mut self.local_nonce);
+            random::bytes(&mut self.local_nonce);
         } else {
             self.local_nonce = vec![0u8; 1];
         }
@@ -274,10 +273,10 @@ impl SecureChannel {
 
     /// Obtains the remote certificate as a byte string
     pub fn remote_cert_as_byte_string(&self) -> ByteString {
-        if self.remote_cert.is_none() {
-            ByteString::null()
+        if let Some(ref remote_cert) = self.remote_cert {
+            remote_cert.as_byte_string()
         } else {
-            self.remote_cert.as_ref().unwrap().as_byte_string()
+            ByteString::null()
         }
     }
 
@@ -385,13 +384,14 @@ impl SecureChannel {
             // Signature size in bytes
             let plain_text_block_size = match *security_header {
                 SecurityHeader::Asymmetric(ref security_header) => {
-                    if !security_header.sender_certificate.is_null() {
+                    if security_header.sender_certificate.is_null() {
+                        error!("Sender has not supplied a certificate so it is doubtful that this will work");
+                        self.security_policy.plain_block_size()
+                    } else {
                         // Padding requires we look at the sending key and security policy
                         let padding = self.security_policy.padding();
                         let x509 = X509::from_byte_string(&security_header.sender_certificate).unwrap();
                         x509.public_key().unwrap().plain_text_block_size(padding)
-                    } else {
-                        0
                     }
                 }
                 SecurityHeader::Symmetric(_) => {
@@ -759,7 +759,7 @@ impl SecureChannel {
 
         let our_cert = self.cert.as_ref().unwrap();
         let our_thumbprint = our_cert.thumbprint();
-        if &our_thumbprint.value[..] != receiver_thumbprint.as_ref() {
+        if our_thumbprint.value() != receiver_thumbprint.as_ref() {
             error!("Supplied thumbprint does not match application certificate's thumbprint");
             Err(StatusCode::BadNoValidCertificates)
         } else {

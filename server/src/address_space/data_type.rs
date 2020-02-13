@@ -1,40 +1,48 @@
+//! Contains the implementation of `Method` and `MethodBuilder`.
+
 use opcua_types::service_types::DataTypeAttributes;
 
-use crate::address_space::{base::Base, node::Node, node::NodeAttributes};
+use crate::address_space::{base::Base, node::NodeBase, node::Node};
 
+node_builder_impl!(DataTypeBuilder, DataType);
+
+/// A `DataType` is a type of node within the `AddressSpace`.
 #[derive(Debug)]
 pub struct DataType {
     base: Base,
     is_abstract: bool,
 }
 
-node_impl!(DataType);
+impl Default for DataType {
+    fn default() -> Self {
+        Self {
+            base: Base::new(NodeClass::DataType, &NodeId::null(), "", ""),
+            is_abstract: false,
+        }
+    }
+}
 
-impl NodeAttributes for DataType {
-    fn get_attribute(&self, attribute_id: AttributeId, max_age: f64) -> Option<DataValue> {
-        self.base.get_attribute(attribute_id, max_age).or_else(|| {
-            match attribute_id {
-                AttributeId::IsAbstract => Some(Variant::from(self.is_abstract())),
-                _ => None
-            }.map(|v| v.into())
-        })
+node_base_impl!(DataType);
+
+impl Node for DataType {
+    fn get_attribute_max_age(&self, attribute_id: AttributeId, max_age: f64) -> Option<DataValue> {
+        match attribute_id {
+            AttributeId::IsAbstract => Some(Variant::from(self.is_abstract()).into()),
+            _ => self.base.get_attribute_max_age(attribute_id, max_age)
+        }
     }
 
     fn set_attribute(&mut self, attribute_id: AttributeId, value: Variant) -> Result<(), StatusCode> {
-        if let Some(value) = self.base.set_attribute(attribute_id, value)? {
-            match attribute_id {
-                AttributeId::IsAbstract => {
-                    if let Variant::Boolean(v) = value {
-                        self.set_is_abstract(v);
-                        Ok(())
-                    } else {
-                        Err(StatusCode::BadTypeMismatch)
-                    }
+        match attribute_id {
+            AttributeId::IsAbstract => {
+                if let Variant::Boolean(v) = value {
+                    self.set_is_abstract(v);
+                    Ok(())
+                } else {
+                    Err(StatusCode::BadTypeMismatch)
                 }
-                _ => Err(StatusCode::BadAttributeIdInvalid)
             }
-        } else {
-            Ok(())
+            _ => self.base.set_attribute(attribute_id, value)
         }
     }
 }
@@ -70,6 +78,10 @@ impl DataType {
             error!("DataType cannot be created from attributes - missing mandatory values");
             Err(())
         }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.base.is_valid()
     }
 
     pub fn is_abstract(&self) -> bool {

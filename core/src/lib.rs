@@ -1,5 +1,5 @@
-//! The OPC UA Core module holds functionality that is common to server and clients that make use of OPC UA
-//! It contains functionality such as message chunking, cryptography / pki and standard handshake messages.
+//! The OPC UA Core module holds functionality that is common to server and clients that make use of OPC UA.
+//! It contains message chunking, cryptography / pki, communications and standard handshake messages.
 
 #[macro_use]
 extern crate log;
@@ -54,8 +54,6 @@ macro_rules! trace_write_lock_unwrap {
     }
 }
 
-
-#[macro_export]
 lazy_static! {
     pub static ref RUNTIME: crate::runtime::Runtime = crate::runtime::Runtime::default();
 }
@@ -77,7 +75,6 @@ macro_rules! runtime_components {
 #[macro_export]
 macro_rules! register_runtime_component {
     ( $component_name:expr ) => {
-        use opcua_core::RUNTIME;
         RUNTIME.register_component($component_name);
     }
 }
@@ -86,7 +83,6 @@ macro_rules! register_runtime_component {
 #[macro_export]
 macro_rules! deregister_runtime_component {
     ( $component_name:expr ) => {
-        use opcua_core::RUNTIME;
         RUNTIME.deregister_component($component_name);
     }
 }
@@ -139,6 +135,7 @@ pub mod config;
 pub mod crypto;
 pub mod handle;
 pub mod runtime;
+pub mod completion_pact;
 
 /// Contains most of the things that are typically required from a client / server.
 pub mod prelude {

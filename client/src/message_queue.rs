@@ -6,13 +6,18 @@ use opcua_types::*;
 
 pub(crate) struct MessageQueue {
     /// The requests that are in-flight, defined by their request handle and an async flag. Basically,
-    /// the sent requests reside here  until the response returns at which point the entry is removed.
+    /// the sent requests reside here until the response returns at which point the entry is removed.
     /// If a response is received for which there is no entry, the response will be discarded.
     inflight_requests: HashSet<(u32, bool)>,
     /// A map of incoming responses waiting to be processed
     responses: HashMap<u32, (SupportedMessage, bool)>,
     /// This is the queue that messages will be sent onto the transport for sending
-    sender: Option<UnboundedSender<SupportedMessage>>,
+    sender: Option<UnboundedSender<Message>>,
+}
+
+pub enum Message {
+    Quit,
+    SupportedMessage(SupportedMessage),
 }
 
 impl MessageQueue {
@@ -30,14 +35,20 @@ impl MessageQueue {
     }
 
     // Creates the transmission queue that outgoing requests will be sent over
-    pub(crate) fn make_request_channel(&mut self) -> UnboundedReceiver<SupportedMessage> {
-        let (tx, rx) = mpsc::unbounded::<SupportedMessage>();
-        self.sender = Some(tx);
-        rx
+    pub(crate) fn make_request_channel(&mut self) -> (UnboundedSender<Message>, UnboundedReceiver<Message>) {
+        let (tx, rx) = mpsc::unbounded::<Message>();
+        self.sender = Some(tx.clone());
+        (tx, rx)
     }
 
     pub(crate) fn request_was_processed(&mut self, request_handle: u32) {
         debug!("Request {} was processed by the server", request_handle);
+    }
+
+    fn send_message(&mut self, message: Message) {
+        if let Err(err) = self.sender.as_ref().unwrap().unbounded_send(message) {
+            debug!("Cannot sent message to message receiver, error = {:?}", err);
+        }
     }
 
     /// Called by the session to add a request to be sent
@@ -45,7 +56,12 @@ impl MessageQueue {
         let request_handle = request.request_handle();
         trace!("Sending request {:?} to be sent", request);
         self.inflight_requests.insert((request_handle, is_async));
-        let _ = self.sender.as_ref().unwrap().unbounded_send(request);
+        self.send_message(Message::SupportedMessage(request));
+    }
+
+    pub(crate) fn quit(&mut self) {
+        debug!("Sending a quit to the message receiver");
+        self.send_message(Message::Quit);
     }
 
     /// Called when a session's request times out. This call allows the session state to remove
@@ -92,10 +108,6 @@ impl MessageQueue {
 
     /// Called by the session to take the identified response if one exists, otherwise None
     pub(crate) fn take_response(&mut self, request_handle: u32) -> Option<SupportedMessage> {
-        if let Some(response) = self.responses.remove(&request_handle) {
-            Some(response.0)
-        } else {
-            None
-        }
+        self.responses.remove(&request_handle).map(|v| v.0)
     }
 }

@@ -2,11 +2,8 @@ use std::result::Result;
 
 use opcua_types::*;
 use opcua_types::status_code::StatusCode;
-use opcua_types::service_types::*;
 
-use opcua_core::crypto;
-use opcua_core::crypto::SecurityPolicy;
-use opcua_core::crypto::CertificateStore;
+use opcua_core::crypto::{self, SecurityPolicy, CertificateStore, random};
 
 use crate::{
     constants,
@@ -99,7 +96,7 @@ impl SessionService {
                 } else {
                     SignatureData::null()
                 };
-                let authentication_token = NodeId::new(0, ByteString::random(32));
+                let authentication_token = NodeId::new(0, random::byte_string(32));
                 let server_nonce = security_policy.random_nonce();
                 let server_certificate = server_state.server_certificate_as_byte_string();
                 let server_endpoints = Some(endpoints);
@@ -155,7 +152,7 @@ impl SessionService {
         };
 
         if service_result.is_good() {
-            if let Err(err) = server_state.authenticate_endpoint(endpoint_url, security_policy, security_mode, &request.user_identity_token, &session.session_nonce) {
+            if let Err(err) = server_state.authenticate_endpoint(request, endpoint_url, security_policy, security_mode, &request.user_identity_token, &session.session_nonce) {
                 service_result = err;
             }
         }
@@ -173,6 +170,7 @@ impl SessionService {
                 diagnostic_infos,
             }.into()
         } else {
+            session.activated = false;
             self.service_fault(&request.request_header, service_result)
         };
         Ok(response)

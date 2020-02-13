@@ -11,6 +11,10 @@ readme = "../README.md"
 documentation = "https://docs.rs/opcua-core/"
 edition = "2018"
 
+[badges]
+travis-ci = { repository = "locka99/opcua" }
+appveyor = { repository = "locka99/opcua" }
+
 [features]
 default = []
 vendored-openssl = ["openssl/vendored"]
@@ -18,13 +22,13 @@ vendored-openssl = ["openssl/vendored"]
 [dependencies]
 log = "0.4"
 chrono = "0.4"
-ring = "0.13"
 regex = "0.2"
 openssl = "0.10"
 serde = "1.0"
 serde_derive = "1.0"
-serde_yaml = "0.7"
+serde_yaml = "0.8"
 lazy_static = "1.1.0"
+futures = "0.1"
 tokio = "0.1"
 tokio-io = "0.1"
 bytes = "0.4"

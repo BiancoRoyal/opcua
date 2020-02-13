@@ -2,9 +2,8 @@ use std::result::Result;
 
 use opcua_types::{
     *,
-    status_code::StatusCode,
-    service_types::*,
     node_ids::ObjectId,
+    status_code::StatusCode,
 };
 
 use crate::{
@@ -13,8 +12,8 @@ use crate::{
         relative_path,
         types::*,
     },
-    session::Session,
     services::Service,
+    session::Session,
     state::ServerState,
 };
 
@@ -266,7 +265,7 @@ impl NodeManagementService {
         if let Ok(reference_type_id) = item.reference_type_id.as_reference_type_id() {
             // Node Id was either supplied or will be generated
             let new_node_id = if requested_new_node_id.is_null() {
-                NodeId::next_numeric()
+                NodeId::next_numeric(1)
             } else {
                 requested_new_node_id.node_id.clone()
             };
@@ -291,7 +290,7 @@ impl NodeManagementService {
             if let Ok(node) = Self::create_node(&new_node_id, item.node_class, item.browse_name.clone(), &item.node_attributes) {
                 // Add the node to the address space
                 address_space.insert(node, Some(&[
-                    (&item.parent_node_id.node_id, reference_type_id, ReferenceDirection::Forward),
+                    (&item.parent_node_id.node_id, &reference_type_id, ReferenceDirection::Forward),
                 ]));
                 // Object / Variable types must add a reference to the type
                 if item.node_class == NodeClass::Object || item.node_class == NodeClass::Variable {
@@ -326,39 +325,10 @@ impl NodeManagementService {
         } else {
             if let Some(node_type) = address_space.find_node(&item.target_node_id.node_id) {
                 // If the target node exists the class can be compared to the one supplied
-                let valid_node_class = match item.target_node_class {
-                    NodeClass::Object => {
-                        if let NodeType::Object(_) = *node_type { true } else { false }
-                    }
-                    NodeClass::Variable => {
-                        if let NodeType::Variable(_) = *node_type { true } else { false }
-                    }
-                    NodeClass::Method => {
-                        if let NodeType::Method(_) = *node_type { true } else { false }
-                    }
-                    NodeClass::ObjectType => {
-                        if let NodeType::ObjectType(_) = *node_type { true } else { false }
-                    }
-                    NodeClass::VariableType => {
-                        if let NodeType::VariableType(_) = *node_type { true } else { false }
-                    }
-                    NodeClass::ReferenceType => {
-                        if let NodeType::ReferenceType(_) = *node_type { true } else { false }
-                    }
-                    NodeClass::DataType => {
-                        if let NodeType::DataType(_) = *node_type { true } else { false }
-                    }
-                    NodeClass::View => {
-                        if let NodeType::View(_) = *node_type { true } else { false }
-                    }
-                    _ => false
-                };
-                if !valid_node_class {
+                if item.target_node_class != node_type.node_class() {
                     return StatusCode::BadNodeClassInvalid;
                 }
             }
-
-
             if let Ok(reference_type_id) = item.reference_type_id.as_reference_type_id() {
                 if !address_space.has_reference(&item.source_node_id, &item.target_node_id.node_id, reference_type_id) {
                     // TODO test data model constraint
@@ -384,7 +354,7 @@ impl NodeManagementService {
         if !session.can_modify_address_space() {
             // No permission to modify address space
             StatusCode::BadUserAccessDenied
-        } else if address_space.delete_node(&item.node_id, item.delete_target_references) {
+        } else if address_space.delete(&item.node_id, item.delete_target_references) {
             StatusCode::Good
         } else {
             error!("node cannot be deleted");

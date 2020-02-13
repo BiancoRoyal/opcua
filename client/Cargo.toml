@@ -11,6 +11,10 @@ readme = "../README.md"
 documentation = "https://docs.rs/opcua-client/"
 edition = "2018"
 
+[badges]
+travis-ci = { repository = "locka99/opcua" }
+appveyor = { repository = "locka99/opcua" }
+
 [features]
 default = []
 vendored-openssl = ["opcua-core/vendored-openssl"]
@@ -27,6 +31,7 @@ tokio-io = "0.1"
 tokio-timer = "0.2"
 tokio-codec = "0.1"
 futures = "0.1"
+lazy_static = "1.1.0"
 
 [dependencies.opcua-types]
 path = "../types"

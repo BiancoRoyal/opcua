@@ -28,23 +28,21 @@ struct HttpState {
     server_metrics: Arc<RwLock<ServerMetrics>>,
 }
 
-#[cfg(debug_assertions)]
 fn abort(req: &HttpRequest<HttpState>) -> impl Responder {
-    let state = req.state();
-    // Abort the server from the command
-    let mut server_state = state.server_state.write().unwrap();
-    server_state.abort();
-    HttpResponse::Ok()
-        .content_type("text/plain")
-        .body("OK")
-}
-
-#[cfg(not(debug_assertions))]
-fn abort(_: &HttpRequest<HttpState>) -> impl Responder {
-    // Abort is only enabled in debug mode
-    HttpResponse::Ok()
-        .content_type("text/plain")
-        .body("NOT IMPLEMENTED")
+    if cfg!(debug_assertions) {
+        let state = req.state();
+        // Abort the server from the command
+        let mut server_state = state.server_state.write().unwrap();
+        server_state.abort();
+        HttpResponse::Ok()
+            .content_type("text/plain")
+            .body("OK")
+    } else {
+        // Abort is only enabled in debug mode
+        HttpResponse::Ok()
+            .content_type("text/plain")
+            .body("NOT IMPLEMENTED")
+    }
 }
 
 fn metrics(req: &HttpRequest<HttpState>) -> impl Responder {
@@ -54,16 +52,21 @@ fn metrics(req: &HttpRequest<HttpState>) -> impl Responder {
 
     // Send metrics data as json
     let json = {
-        let mut server_metrics = state.server_metrics.write().unwrap();
+        // Careful with the ordering here to avoid potential deadlock. Metrics are locked
+        // several times in scope to avoid deadlocks issues.
         {
             let server_state = state.server_state.read().unwrap();
+            let mut server_metrics = state.server_metrics.write().unwrap();
             server_metrics.update_from_server_state(&server_state);
         }
-        {
+
+        // Take a copy of connections
+        let connections = {
             let connections = state.connections.read().unwrap();
-            let connections = connections.deref();
-            server_metrics.update_from_connections(connections);
-        }
+            connections.clone()
+        };
+        let mut server_metrics = state.server_metrics.write().unwrap();
+        server_metrics.update_from_connections(connections);
         serde_json::to_string_pretty(server_metrics.deref()).unwrap()
     };
 

@@ -1,12 +1,14 @@
 //! Contains the implementation of `ByteString`.
 
 use std::io::{Read, Write};
+use std::convert::TryFrom;
 
 use base64;
 
 use crate::{
+    Guid,
     encoding::{write_i32, BinaryEncoder, EncodingResult, DecodingLimits, process_encode_io_result, process_decode_io_result},
-    status_codes::StatusCode
+    status_codes::StatusCode,
 };
 
 /// A sequence of octets.
@@ -76,6 +78,33 @@ impl From<Vec<u8>> for ByteString {
     }
 }
 
+impl From<Guid> for ByteString {
+    fn from(value: Guid) -> Self {
+        ByteString::from(value.as_bytes().to_vec())
+    }
+}
+
+impl TryFrom<&ByteString> for Guid {
+    type Error = ();
+
+    fn try_from(value: &ByteString) -> Result<Self, Self::Error> {
+        if value.is_null_or_empty() {
+            Err(())
+        }
+        else {
+            let bytes = value.as_ref();
+            if bytes.len() != 16 {
+                Err(())
+            }
+            else {
+                let mut guid = [0u8; 16];
+                guid.copy_from_slice(&bytes[..]);
+                Ok(Guid::from_bytes(guid))
+            }
+        }
+    }
+}
+
 impl Into<String> for ByteString {
     fn into(self) -> String {
         self.as_base64()
@@ -121,15 +150,5 @@ impl ByteString {
         } else {
             base64::encode("")
         }
-    }
-
-    /// Create a byte string with a number of random characters. Can be used to create a nonce or
-    /// a similar reason.
-    pub fn random(number_of_bytes: usize) -> ByteString {
-        use ring::rand::{SystemRandom, SecureRandom};
-        let rng = SystemRandom::new();
-        let mut bytes = vec![0u8; number_of_bytes];
-        let _ = rng.fill(&mut bytes);
-        ByteString::from(bytes)
     }
 }

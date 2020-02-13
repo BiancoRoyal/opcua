@@ -2,24 +2,39 @@
 
 Planned future work is listed at the bottom.
 
-## Known issues
-
-  - Integration tests are broken and need to be fixed
-  - Subscriptions / monitored items generates spurious errors on some clients
-
 ## 0.7 (in progress)
-  - Address space nodes have been made more memory efficient, saving about 3MB of runtime space with
-    the standard node set.
-  - Client and server side support for encrypted passwords in user name identity tokens.
-  - TODO address space. Add a create on demand callback
-  - TODO gen_types.js. Refactor so it could be used to generate code for any model
-  - TODO support events 
-  - TODO More control over limits on the server - number of subscriptions, monitored items, sessions
-  - TODO X509IdentityToken support 
-  - TODO Integration tests are broken and need to be fixed.
-  - TODO Multiple chunk support in client and server, sending and receiving
-  - TODO Session restore after disconnect in server. The server has to stash sessions that were 
-    abnormally disconnected so the session state can be restored if a new connection provides the token.
+  - TODO 0.7 is close to ready but there are some release showstoppers
+     - identify issue with monitored items stalling sometimes, spurious errors on some clients
+     - regression test all samples
+  - Requires Rust 1.37 or later due to use of Self on enums and other small changes to take advantage of refined syntax.
+  - Fix memory leak issue when some client tasks fail to terminate causing tokio / threads to not terminate.
+  - Fix for scenarios where server would not close the socket or could leave tasks running even after the session
+    ended.
+  - Events are supported
+     - Servers can raise / purge events and the monitored item service supports `EventFilter` for filtering
+       and selecting results. 
+     - Clients can subscribe to the event notifier attribute on nodes using `EventFilter`.
+     - Sample `web-client` has a simple interface for subscribing to events from demo-server.
+  - Address space
+     - Server API for accessing the address space is more generic and less complex.
+     - Every node type has a builder, e.g. `Variable` has a `VariableBuilder`. Builders can
+       be used to set the attributes and common references for that type.
+     - Nodes are more memory efficient. In 0.6 every attribute was held in `DataValue` arrays 
+       which bloated memory. Now only the `value` attribute remains stored as a `DataValue` 
+       and primitives are used for all other attributes.
+     - Superfluous hierarchical references between nodes have been removed.
+     - New gen_nodeset.js script that can do node set generation from a schema. The script
+       gen_address_space.js refactored into a helper nodeset.js to reuse the code for this.
+  - Add conditional build features to server's `Cargo.toml` to disable the default address space nodeset and local
+    discovery server registration. Turning off these features can save memory.      
+  - Client and server side support for encrypted passwords within user name identity tokens.
+  - Client and server side support for X509 identity tokens.
+  - New `modbus-server` sample server connects to a MODBUS device and presents values through OPC UA.
+  - [Client](docs/client.md) and [Server](docs/server.md) tutorials. 
+  - More control over limits on the server - number of subscriptions, monitored items, sessions, min publishing interval
+  - Integration test framework with tests for some basic client / server scenarios such as connecting / disconnecting
+    with different security policies.
+  - OPC UA enums are now machine generated
 
 ## 0.6
   - Rust 2018. All `Cargo.toml` files now contain `edition = "2018"` and the code has been cleaned up to benefit from 
@@ -147,20 +162,25 @@ Planned future work is listed at the bottom.
 
 
 # Future work
+  
+An aspirational list of things that would be nice to implement in the future:
 
 ## Short term
-  
 
-## Longer term
-  
-ASPIRATIONAL - a short list of things that would be nice to implement in the future
-
-  - Code that generates Option<Vec<Foo>> should probably return Vec<Foo> instead to simplify access to the list
-  - Multiple chunks
-  - User-level permission model, i.e. ability to limit access to address space based on identity
-  - Replace more OpenSSL with `ring` equivalent functions. Ring doesn't do X509 so code is still
-    dependent on OpenSSL until a drop-in replacement appears - need something which can generate, read and write X509
-    certs, private keys and their corresponding .der, .pem file formats.
-  - Tokio codec - use a codec and frame writer to write message chunks
-  - Tokio/Futures/`async`/`await` - Rust 2018 will implement new async functionality over time
+  - Session restore after disconnect in server. The server has to stash sessions that were 
+    abnormally disconnected so the session state can be restored if a new connection provides the token.
+  - prevent nested arrays from being deserialized.
+  - Multiple chunk support in client and server, sending and receiving.
+  - Add session diagnostics to the address space
+  - Update Tokio/Futures for `async`/`await` - Rust 2018 will implement new async functionality over time
     and this project will reflect best practice.
+  - Encapsulate all the crypto into a "crypto" feature and perhaps a opcua-crypto crate so it can be enabled or disabled
+  
+## Longer term
+
+  - User-level permission model, i.e. ability to limit access to address space based on identity
+  - Replace more OpenSSL with a native Rust equivalent library. Must support all the crypto, hashing / digest and key
+    creation APIs required by the lib.
+  - Tokio codec - use a codec and frame writer to write message chunks
+  - Model enforcement rules for address space data coherence. At present, the server is expected to just know what it is
+    doing. Perhaps that is a reasonable thing to assume.

@@ -1,115 +1,116 @@
+//! Contains the implementation of `Variable` and `VariableBuilder`.
+
 use std::sync::{Arc, Mutex};
 use std::convert::{Into, TryFrom};
 
 use opcua_types::node_ids::DataTypeId;
+use opcua_types::service_types::VariableAttributes;
 
 use crate::{
     callbacks::{AttributeGetter, AttributeSetter},
     address_space::{
         AccessLevel, UserAccessLevel,
+        AttrFnGetter, AttrFnSetter,
         base::Base,
-        node::{Node, NodeAttributes},
+        node::{NodeBase, Node},
     },
 };
-use opcua_types::service_types::VariableAttributes;
 
-/// This is a builder object for constructing variable nodes programmatically.
-pub struct VariableBuilder {
-    node: Variable
-}
+// This is a builder object for constructing variable nodes programmatically.
 
-macro_rules! node_builder_impl {
-    ( $node_builder_struct:ident ) => {
-        impl $node_builder_struct {
-
-            fn node_id(mut self, node_id: NodeId) -> Self {
-                let _ = self.node.base.set_node_id(node_id);
-                self
-            }
-
-            pub fn browse_name<V>(mut self, browse_name: V) -> Self where V: Into<QualifiedName> {
-                let _ = self.node.base.set_browse_name(browse_name);
-                self
-            }
-
-            pub fn display_name<V>(mut self, display_name: V) -> Self where V: Into<LocalizedText> {
-                self.node.set_display_name(display_name.into());
-                self
-            }
-
-            pub fn description<V>(mut self, description: V) -> Self where V: Into<LocalizedText>{
-                self.node.set_description(description.into());
-                self
-            }
-        }
-    }
-}
-
-node_builder_impl!(VariableBuilder);
+node_builder_impl!(VariableBuilder, Variable);
+node_builder_impl_component_of!(VariableBuilder);
+node_builder_impl_property_of!(VariableBuilder);
 
 impl VariableBuilder {
-    pub fn new(node_id: &NodeId) -> VariableBuilder {
-        VariableBuilder {
-            node: Variable::default()
-        }.node_id(node_id.clone())
-    }
-
-    pub fn is_valid(&self) -> bool {
-        self.node.is_valid()
-    }
-
+    /// Sets the value of the variable.
     pub fn value<V>(mut self, value: V) -> Self where V: Into<Variant> {
         let _ = self.node.set_value(value);
         self
     }
 
+    /// Sets the data type of the variable.
     pub fn data_type<T>(mut self, data_type: T) -> Self where T: Into<NodeId> {
         self.node.set_data_type(data_type);
         self
     }
 
+    /// Sets the historizing flag for the variable.
     pub fn historizing(mut self, historizing: bool) -> Self {
         self.node.set_historizing(historizing);
         self
     }
 
+    /// Sets the access level for the variable.
     pub fn access_level(mut self, access_level: AccessLevel) -> Self {
         self.node.set_access_level(access_level);
         self
     }
 
+    /// Sets the user access level for the variable.
     pub fn user_access_level(mut self, user_access_level: UserAccessLevel) -> Self {
         self.node.set_user_access_level(user_access_level);
         self
     }
 
+    /// Sets the value rank for the variable.
     pub fn value_rank(mut self, value_rank: i32) -> Self {
         self.node.set_value_rank(value_rank);
         self
     }
 
+    /// Sets the array dimensions for the variable.
     pub fn array_dimensions(mut self, array_dimensions: &[u32]) -> Self {
         self.node.set_array_dimensions(array_dimensions);
         self
     }
 
+    /// Makes the variable writable (by default it isn't)
+    pub fn writable(mut self) -> Self {
+        self.node.set_access_level(self.node.access_level() & AccessLevel::CURRENT_WRITE);
+        self
+    }
+
+    /// Sets the minimum sampling interval for the variable.
     pub fn minimum_sampling_interval(mut self, minimum_sampling_interval: f64) -> Self {
         self.node.set_minimum_sampling_interval(minimum_sampling_interval);
         self
     }
 
-    /// Yields the built variable. This function will panic if the variable is invalid.
-    pub fn build(self) -> Variable {
-        if self.is_valid() {
-            self.node
-        } else {
-            panic!("The variable is not valid, node id = {:?}", self.node.base.node_id());
-        }
+    /// Sets a value getter function for the variable. Whenever the value of a variable
+    /// needs to be fetched (e.g. from a monitored item subscription), this function will be called
+    /// to get the value.
+    pub fn value_getter<F>(mut self, getter: F) -> Self where
+        F: FnMut(&NodeId, AttributeId, f64) -> Result<Option<DataValue>, StatusCode> + Send + 'static
+    {
+        self.node.set_value_getter(Arc::new(Mutex::new(AttrFnGetter::new(getter))));
+        self
+    }
+
+    /// Sets a value setter function for the variable. Whenever the value of a variable is set via
+    /// a service, this function will be called to set the value. It is up to the implementation
+    /// to decide what to do if that happens.
+    pub fn value_setter<F>(mut self, setter: F) -> Self where
+        F: FnMut(&NodeId, AttributeId, DataValue) -> Result<(), StatusCode> + Send + 'static
+    {
+        self.node.set_value_setter(Arc::new(Mutex::new(AttrFnSetter::new(setter))));
+        self
+    }
+
+    /// Add a reference to the variable indicating it has a type of another node.
+    pub fn has_type_definition<T>(self, type_id: T) -> Self where T: Into<NodeId> {
+        self.reference(type_id, ReferenceTypeId::HasTypeDefinition, ReferenceDirection::Forward)
+    }
+
+    /// Add a reference to the variable indicating it has a modelling rule of another node.
+    pub fn has_modelling_rule<T>(self, type_id: T) -> Self where T: Into<NodeId> {
+        self.reference(type_id, ReferenceTypeId::HasModellingRule, ReferenceDirection::Forward)
     }
 }
 
 // Note we use derivative builder macro so we can skip over the value getter / setter
 
+/// A `Variable` is a type of node within the `AddressSpace`.
 #[derive(Derivative)]
 #[derivative(Debug)]
 pub struct Variable {
@@ -128,19 +129,16 @@ pub struct Variable {
     value_getter: Option<Arc<Mutex<dyn AttributeGetter + Send>>>,
 }
 
-node_impl!(Variable);
-
 impl Default for Variable {
     fn default() -> Self {
-        let data_type: NodeId = DataTypeId::Int32.into();
-        Variable {
+        Self {
             base: Base::new(NodeClass::Variable, &NodeId::null(), "", ""),
-            data_type,
+            data_type: NodeId::null(),
             historizing: false,
             value_rank: -1,
             value: Variant::Empty.into(),
-            access_level: 0,
-            user_access_level: 0,
+            access_level: UserAccessLevel::CURRENT_READ.bits(),
+            user_access_level: AccessLevel::CURRENT_READ.bits(),
             array_dimensions: None,
             minimum_sampling_interval: None,
             value_getter: None,
@@ -149,96 +147,77 @@ impl Default for Variable {
     }
 }
 
-impl NodeAttributes for Variable {
-    fn get_attribute(&self, attribute_id: AttributeId, max_age: f64) -> Option<DataValue> {
-        self.base.get_attribute(attribute_id, max_age).or_else(|| {
-            if attribute_id == AttributeId::Value {
-                Some(self.value())
-            } else {
-                match attribute_id {
-                    // Mandatory attributes
-                    AttributeId::DataType => Some(Variant::from(self.data_type())),
-                    AttributeId::Historizing => Some(Variant::from(self.historizing())),
-                    AttributeId::ValueRank => Some(Variant::from(self.value_rank())),
-                    AttributeId::AccessLevel => Some(Variant::from(self.access_level().bits())),
-                    AttributeId::UserAccessLevel => Some(Variant::from(self.user_access_level().bits())),
-                    // Optional attributes
-                    AttributeId::ArrayDimensions => {
-                        if let Some(ref array_dimensions) = self.array_dimensions() {
-                            Some(Variant::from(array_dimensions))
-                        } else {
-                            None
-                        }
-                    }
-                    AttributeId::MinimumSamplingInterval => {
-                        if let Some(minimum_sampling_interval) = self.minimum_sampling_interval() {
-                            Some(Variant::from(minimum_sampling_interval))
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None
-                }.map(|v| v.into())
-            }
-        })
+node_base_impl!(Variable);
+
+impl Node for Variable {
+    fn get_attribute_max_age(&self, attribute_id: AttributeId, max_age: f64) -> Option<DataValue> {
+        match attribute_id {
+            // Mandatory attributes
+            AttributeId::Value => Some(self.value()),
+            AttributeId::DataType => Some(Variant::from(self.data_type()).into()),
+            AttributeId::Historizing => Some(Variant::from(self.historizing()).into()),
+            AttributeId::ValueRank => Some(Variant::from(self.value_rank()).into()),
+            AttributeId::AccessLevel => Some(Variant::from(self.access_level().bits()).into()),
+            AttributeId::UserAccessLevel => Some(Variant::from(self.user_access_level().bits()).into()),
+            // Optional attributes
+            AttributeId::ArrayDimensions => self.array_dimensions().map(|v| Variant::from(v).into()),
+            AttributeId::MinimumSamplingInterval => self.minimum_sampling_interval().map(|v| Variant::from(v).into()),
+            _ => self.base.get_attribute_max_age(attribute_id, max_age)
+        }
     }
 
     fn set_attribute(&mut self, attribute_id: AttributeId, value: Variant) -> Result<(), StatusCode> {
-        if let Some(value) = self.base.set_attribute(attribute_id, value)? {
-            match attribute_id {
-                AttributeId::DataType => if let Variant::NodeId(v) = value {
-                    self.set_data_type(*v);
-                    Ok(())
-                } else {
-                    Err(StatusCode::BadTypeMismatch)
-                },
-                AttributeId::Historizing => if let Variant::Boolean(v) = value {
-                    self.set_historizing(v);
-                    Ok(())
-                } else {
-                    Err(StatusCode::BadTypeMismatch)
-                },
-                AttributeId::ValueRank => if let Variant::Int32(v) = value {
-                    self.set_value_rank(v);
-                    Ok(())
-                } else {
-                    Err(StatusCode::BadTypeMismatch)
-                },
-                AttributeId::Value => {
-                    self.set_value(value);
-                    Ok(())
-                }
-                AttributeId::AccessLevel => if let Variant::Byte(v) = value {
-                    self.set_access_level(AccessLevel::from_bits_truncate(v));
-                    Ok(())
-                } else {
-                    Err(StatusCode::BadTypeMismatch)
-                },
-                AttributeId::UserAccessLevel => if let Variant::Byte(v) = value {
-                    self.set_user_access_level(UserAccessLevel::from_bits_truncate(v));
-                    Ok(())
-                } else {
-                    Err(StatusCode::BadTypeMismatch)
-                },
-                AttributeId::ArrayDimensions => {
-                    let array_dimensions = <Vec<u32>>::try_from(&value);
-                    if let Ok(array_dimensions) = array_dimensions {
-                        self.set_array_dimensions(&array_dimensions);
-                        Ok(())
-                    } else {
-                        Err(StatusCode::BadTypeMismatch)
-                    }
-                }
-                AttributeId::MinimumSamplingInterval => if let Variant::Double(v) = value {
-                    self.set_minimum_sampling_interval(v);
-                    Ok(())
-                } else {
-                    Err(StatusCode::BadTypeMismatch)
-                },
-                _ => Err(StatusCode::BadAttributeIdInvalid)
+        match attribute_id {
+            AttributeId::DataType => if let Variant::NodeId(v) = value {
+                self.set_data_type(*v);
+                Ok(())
+            } else {
+                Err(StatusCode::BadTypeMismatch)
+            },
+            AttributeId::Historizing => if let Variant::Boolean(v) = value {
+                self.set_historizing(v);
+                Ok(())
+            } else {
+                Err(StatusCode::BadTypeMismatch)
+            },
+            AttributeId::ValueRank => if let Variant::Int32(v) = value {
+                self.set_value_rank(v);
+                Ok(())
+            } else {
+                Err(StatusCode::BadTypeMismatch)
+            },
+            AttributeId::Value => {
+                self.set_value(value);
+                Ok(())
             }
-        } else {
-            Ok(())
+            AttributeId::AccessLevel => if let Variant::Byte(v) = value {
+                self.set_access_level(AccessLevel::from_bits_truncate(v));
+                Ok(())
+            } else {
+                Err(StatusCode::BadTypeMismatch)
+            },
+            AttributeId::UserAccessLevel => if let Variant::Byte(v) = value {
+                self.set_user_access_level(UserAccessLevel::from_bits_truncate(v));
+                Ok(())
+            } else {
+                Err(StatusCode::BadTypeMismatch)
+            },
+            AttributeId::ArrayDimensions => {
+                let array_dimensions = <Vec<u32>>::try_from(&value);
+                if let Ok(array_dimensions) = array_dimensions {
+                    self.set_array_dimensions(&array_dimensions);
+                    Ok(())
+                } else {
+                    Err(StatusCode::BadTypeMismatch)
+                }
+            }
+            AttributeId::MinimumSamplingInterval => if let Variant::Double(v) = value {
+                self.set_minimum_sampling_interval(v);
+                Ok(())
+            } else {
+                Err(StatusCode::BadTypeMismatch)
+            },
+            _ => self.base.set_attribute(attribute_id, value)
         }
     }
 }
@@ -320,9 +299,7 @@ impl Variable {
             _ => None
         };
 
-        let builder = VariableBuilder::new(node_id)
-            .display_name(display_name)
-            .browse_name(browse_name)
+        let builder = VariableBuilder::new(node_id, browse_name, display_name)
             .user_access_level(UserAccessLevel::CURRENT_READ)
             .access_level(AccessLevel::CURRENT_READ)
             .data_type(data_type)
@@ -339,7 +316,7 @@ impl Variable {
     }
 
     pub fn is_valid(&self) -> bool {
-        !self.base.node_id().is_null()
+        self.base.is_valid()
     }
 
     pub fn value(&self) -> DataValue {
@@ -357,22 +334,9 @@ impl Variable {
         // The value set to the value getter
         if let Some(ref value_setter) = self.value_setter {
             let mut value_setter = value_setter.lock().unwrap();
-            let value = value.into();
-            let data_value = if let Variant::DataValue(value) = value {
-                // A variant containing a datavalue is treated as though that should be
-                // the datavalue to set.
-                *value
-            } else {
-                value.into()
-            };
-            let _ = value_setter.set(&self.node_id(), AttributeId::Value, data_value);
+            let _ = value_setter.set(&self.node_id(), AttributeId::Value, value.into());
         } else {
             let now = DateTime::now();
-            let value = if let Variant::DataValue(value) = value {
-                value.value.unwrap_or(Variant::Empty)
-            } else {
-                value
-            };
             self.set_value_direct(value, &now, &now);
         }
     }
@@ -384,16 +348,12 @@ impl Variable {
         self.value.source_timestamp = Some(source_timestamp.clone());
     }
 
-    /// Sets a getter function that will be called to get the value of this variable. Note
-    /// you most likely want to set the corresponding setter too otherwise you will never get back
-    /// the values you set otherwise.
+    /// Sets a getter function that will be called to get the value of this variable.
     pub fn set_value_getter(&mut self, value_getter: Arc<Mutex<dyn AttributeGetter + Send>>) {
         self.value_getter = Some(value_getter);
     }
 
-    /// Sets a setter function that will be called to set the value of this variable. Note
-    /// you most likely want to set the corresponding getter too otherwise you will never get back
-    /// the values you set otherwise.
+    /// Sets a setter function that will be called to set the value of this variable.
     pub fn set_value_setter(&mut self, value_setter: Arc<Mutex<dyn AttributeSetter + Send>>) {
         self.value_setter = Some(value_setter);
     }
@@ -412,14 +372,19 @@ impl Variable {
         self.minimum_sampling_interval = Some(minimum_sampling_interval);
     }
 
+    /// Test if the variable is readable. This will be called by services before getting the value
+    /// of the node.
     pub fn is_readable(&self) -> bool {
         self.access_level().contains(AccessLevel::CURRENT_READ)
     }
 
+    /// Test if the variable is writable. This will be called by services before setting the value
+    /// on the node.
     pub fn is_writable(&self) -> bool {
         self.access_level().contains(AccessLevel::CURRENT_WRITE)
     }
 
+    /// Sets the variable writable state.
     pub fn set_writable(&mut self, writable: bool) {
         let mut access_level = self.access_level();
         if writable {
@@ -430,26 +395,32 @@ impl Variable {
         self.set_access_level(access_level);
     }
 
+    /// Returns the access level of the variable.
     pub fn access_level(&self) -> AccessLevel {
         AccessLevel::from_bits_truncate(self.access_level)
     }
 
+    /// Sets the access level of the variable.
     pub fn set_access_level(&mut self, access_level: AccessLevel) {
         self.access_level = access_level.bits();
     }
 
+    /// Test if the variable is user readable.
     pub fn is_user_readable(&self) -> bool {
         self.user_access_level().contains(UserAccessLevel::CURRENT_READ)
     }
 
+    /// Test if the variable is user writable.
     pub fn is_user_writable(&self) -> bool {
         self.user_access_level().contains(UserAccessLevel::CURRENT_WRITE)
     }
 
+    /// Returns the user access level of the variable.
     pub fn user_access_level(&self) -> UserAccessLevel {
         UserAccessLevel::from_bits_truncate(self.user_access_level)
     }
 
+    /// Set the user access level of the variable.
     pub fn set_user_access_level(&mut self, user_access_level: UserAccessLevel) {
         self.user_access_level = user_access_level.bits();
     }

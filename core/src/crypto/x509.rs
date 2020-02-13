@@ -1,20 +1,17 @@
 // X509 certificate wrapper.
 
-use std;
-use std::marker::Send;
-use std::fmt::{Debug, Formatter};
-use std::result::Result;
+use std::{
+    self,
+    fmt::{Debug, Formatter},
+    result::Result,
+};
 
-use openssl::{x509, nid::Nid};
+use chrono::{DateTime, TimeZone, Utc};
+use openssl::{nid::Nid, x509};
 
-use chrono::{DateTime, Utc, TimeZone};
+use opcua_types::{ByteString, service_types::ApplicationDescription, status_code::StatusCode};
 
-use opcua_types::ByteString;
-use opcua_types::service_types::ApplicationDescription;
-use opcua_types::status_code::StatusCode;
-
-use crate::crypto::pkey::PublicKey;
-use crate::crypto::thumbprint::Thumbprint;
+use crate::crypto::{pkey::PublicKey, thumbprint::Thumbprint};
 
 const DEFAULT_KEYSIZE: u32 = 2048;
 const DEFAULT_COUNTRY: &str = "IE";
@@ -37,7 +34,7 @@ pub struct X509Data {
 
 impl From<ApplicationDescription> for X509Data {
     fn from(application_description: ApplicationDescription) -> Self {
-        let alt_host_names = Self::alt_host_names(application_description.application_uri.as_ref(), false, true);
+        let alt_host_names = Self::alt_host_names(application_description.application_uri.as_ref(), true, true);
         X509Data {
             key_size: DEFAULT_KEYSIZE,
             common_name: application_description.application_name.to_string(),
@@ -76,8 +73,7 @@ impl X509Data {
         }
         // Get the machine name / ip address
         if add_computer_name {
-            let mut computer_hostnames = Self::computer_hostnames();
-            computer_hostnames.drain(..).for_each(|h| result.push(h));
+            result.extend(Self::computer_hostnames());
         }
         result
     }
@@ -111,11 +107,6 @@ impl Debug for X509 {
         write!(f, "[x509]")
     }
 }
-
-/// This allows certs to be transferred between threads
-unsafe impl Send for X509 {}
-
-unsafe impl std::marker::Sync for X509 {}
 
 impl From<x509::X509> for X509 {
     fn from(value: x509::X509) -> Self {
@@ -219,7 +210,7 @@ impl X509 {
         // Look through alt subject names for a matching dns entry
         if let Some(ref alt_names) = self.value.subject_alt_names() {
             // Skip the application uri
-            let found = alt_names.iter().skip(1).find(|n| {
+            let found = alt_names.iter().skip(1).any(|n| {
                 if let Some(dns) = n.dnsname() {
                     // Case insensitive comparison
                     dns.eq_ignore_ascii_case(hostname)
@@ -227,11 +218,12 @@ impl X509 {
                     false
                 }
             });
-            if found.is_some() {
+            if found {
                 info!("Certificate host name {} is good", hostname);
                 StatusCode::Good
             } else {
-                error!("Cannot find a matching hostname for input {}", hostname);
+                let alt_names = alt_names.iter().skip(1).map(|n| n.dnsname().unwrap_or("")).collect::<Vec<&str>>().join(", ");
+                error!("Cannot find a matching hostname for input {}, alt names = {}", hostname,alt_names);
                 StatusCode::BadCertificateHostNameInvalid
             }
         } else {
@@ -317,20 +309,26 @@ impl X509 {
     }
 }
 
-#[test]
-fn parse_asn1_date_test() {
-    use chrono::{Datelike, Timelike};
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    assert!(X509::parse_asn1_date("").is_err());
-    assert!(X509::parse_asn1_date("Jan 69 00:00:00 1970").is_err());
-    assert!(X509::parse_asn1_date("Feb 21 00:00:00 1970").is_ok());
-    assert!(X509::parse_asn1_date("Feb 21 00:00:00 1970 GMT").is_ok());
+    #[test]
+    fn parse_asn1_date_test() {
+        use chrono::{Datelike, Timelike};
 
-    let dt: DateTime<Utc> = X509::parse_asn1_date("Feb 21 12:45:30 1999 GMT").unwrap();
-    assert_eq!(dt.month(), 2);
-    assert_eq!(dt.day(), 21);
-    assert_eq!(dt.hour(), 12);
-    assert_eq!(dt.minute(), 45);
-    assert_eq!(dt.second(), 30);
-    assert_eq!(dt.year(), 1999);
+        assert!(X509::parse_asn1_date("").is_err());
+        assert!(X509::parse_asn1_date("Jan 69 00:00:00 1970").is_err());
+        assert!(X509::parse_asn1_date("Feb 21 00:00:00 1970").is_ok());
+        assert!(X509::parse_asn1_date("Feb 21 00:00:00 1970 GMT").is_ok());
+
+        let dt: DateTime<Utc> = X509::parse_asn1_date("Feb 21 12:45:30 1999 GMT").unwrap();
+        assert_eq!(dt.month(), 2);
+        assert_eq!(dt.day(), 21);
+        assert_eq!(dt.hour(), 12);
+        assert_eq!(dt.minute(), 45);
+        assert_eq!(dt.second(), 30);
+        assert_eq!(dt.year(), 1999);
+    }
 }
+

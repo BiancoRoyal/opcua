@@ -8,11 +8,11 @@ use crate::{
     encoding::*,
     basic_types::*,
     node_id::NodeId,
-    basic_types::QualifiedName,
+    qualified_name::QualifiedName,
     string::UAString,
 };
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SimpleAttributeOperand {
     pub type_definition_id: NodeId,
     pub browse_path: Option<Vec<QualifiedName>>,

@@ -1,23 +1,23 @@
 //! The certificate store holds and retrieves private keys and certificates from disk. It is responsible
 //! for checking certificates supplied by the remote end to see if they are valid and trusted or not.
-use std::path::{Path, PathBuf};
 use std::fs::{File, metadata};
-use std::io::{Write, Read};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
 use openssl::{
-    x509::{self, extension::*},
-    pkey,
-    rsa::*,
     asn1::*,
     hash::*,
+    pkey,
+    rsa::*,
+    x509::{self, extension::*},
 };
 
 use opcua_types::service_types::ApplicationDescription;
 use opcua_types::status_code::StatusCode;
 
 use crate::crypto::{
-    x509::{X509, X509Data},
     pkey::PrivateKey,
+    x509::{X509, X509Data},
 };
 
 /// The name that the server/client's application instance certificate is expected to be
@@ -211,6 +211,15 @@ impl CertificateStore {
         }
     }
 
+    /// Fetches the public certificate and private key into options
+    pub fn read_own_cert_and_pkey_optional(&self) -> (Option<X509>, Option<PrivateKey>) {
+        if let Ok((cert, key)) = self.read_own_cert_and_pkey() {
+            (Some(cert), Some(key))
+        } else {
+            (None, None)
+        }
+    }
+
     /// This function will use the supplied arguments to create an Application Instance Certificate
     /// consisting of a X509v3 certificate and public/private key pair. The cert (including pubkey)
     /// and private key will be written to disk under the pki path.
@@ -350,6 +359,7 @@ impl CertificateStore {
                 let now = Utc::now();
                 let status_code = cert.is_time_valid(&now);
                 if status_code.is_bad() {
+                    warn!("Certificate {} is not valid for now, check start/end timestamps", cert_file_name);
                     return status_code;
                 }
             }
@@ -358,6 +368,7 @@ impl CertificateStore {
             if let Some(hostname) = hostname {
                 let status_code = cert.is_hostname_valid(hostname);
                 if status_code.is_bad() {
+                    warn!("Certificate {} does not have a valid hostname", cert_file_name);
                     return status_code;
                 }
             }
@@ -366,6 +377,7 @@ impl CertificateStore {
             if let Some(application_uri) = application_uri {
                 let status_code = cert.is_application_uri_valid(application_uri);
                 if status_code.is_bad() {
+                    warn!("Certificate {} does not have a valid application uri", cert_file_name);
                     return status_code;
                 }
             }
@@ -420,7 +432,6 @@ impl CertificateStore {
     /// A string description of any failure
     ///
     fn ensure_dir(path: &Path) -> Result<(), String> {
-        use std;
         if path.exists() {
             if !path.is_dir() {
                 Err(format!("{} is not a directory ", path.display()))
@@ -526,7 +537,7 @@ impl CertificateStore {
     ///
     /// A string description of any failure
     ///
-    fn read_cert(path: &Path) -> Result<X509, String> {
+    pub fn read_cert(path: &Path) -> Result<X509, String> {
         let file = File::open(path);
         if file.is_err() {
             return Err(format!("Could not open cert file {}", path.display()));

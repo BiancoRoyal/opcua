@@ -6,19 +6,34 @@
 //! that calls a client supplied function when it triggers.
 use std::fmt;
 
-use opcua_types::status_code::StatusCode;
+use opcua_types::{
+    status_code::StatusCode,
+    service_types::EventNotificationList,
+};
 
 use crate::subscription::MonitoredItem;
 
-/// This trait is implemented by something that wishes to receive subscription data change notifications.
-pub trait OnDataChange {
-    fn data_change(&mut self, data_change_items: Vec<&MonitoredItem>);
+/// The `OnSubscriptionNotification` trait is the callback registered to a subscription for
+/// something that wishes to receive subscription notifications.
+///
+/// Unless your subscription contains a mix of items which are monitoring data and events
+/// you probably only need to implement either `data_change()`, or `event()` and leave the default,
+/// no-op implementation for the other.
+pub trait OnSubscriptionNotification {
+    /// Called by the subscription after a `DataChangeNotification`. The default implementation
+    /// does nothing.
+    fn on_data_change(&mut self, _data_change_items: Vec<&MonitoredItem>) {}
+
+    /// Called by the subscription after a `EventNotificationList`. The notifications contained within
+    /// are individual `EventFieldList` structs filled from the select clause criteria from when the
+    /// event was constructed. The default implementation does nothing.
+    fn on_event(&mut self, _events: &EventNotificationList) {}
 }
 
 /// This trait is implemented by something that wishes to receive connection status change notifications.
 pub trait OnConnectionStatusChange {
     /// Called when the connection status changes from connected to disconnected or vice versa
-    fn connection_status_change(&mut self, connected: bool);
+    fn on_connection_status_change(&mut self, connected: bool);
 }
 
 pub trait OnSessionClosed {
@@ -29,17 +44,18 @@ pub trait OnSessionClosed {
     /// If no session retry policy has been created for the client session, the server implementation
     /// might choose to reconnect in response to a bad status code by itself, however it should
     /// avoid retrying too quickly or indefinitely in case the error is permanent.
-    fn session_closed(&mut self, status_code: StatusCode);
+    fn on_session_closed(&mut self, status_code: StatusCode);
 }
 
-/// This is a concrete implementation of [`OnDataChange`] that calls a function.
+/// This is a concrete implementation of [`OnSubscriptionNotification`] that calls a function when
+/// a data change occurs.
 pub struct DataChangeCallback {
     /// The actual call back
     cb: Box<dyn Fn(Vec<&MonitoredItem>) + Send + Sync + 'static>
 }
 
-impl OnDataChange for DataChangeCallback {
-    fn data_change(&mut self, data_change_items: Vec<&MonitoredItem>) {
+impl OnSubscriptionNotification for DataChangeCallback {
+    fn on_data_change(&mut self, data_change_items: Vec<&MonitoredItem>) {
         (self.cb)(data_change_items);
     }
 }
@@ -47,6 +63,28 @@ impl OnDataChange for DataChangeCallback {
 impl DataChangeCallback {
     /// Constructs a callback from the supplied function
     pub fn new<CB>(cb: CB) -> Self where CB: Fn(Vec<&MonitoredItem>) + Send + Sync + 'static {
+        Self {
+            cb: Box::new(cb)
+        }
+    }
+}
+
+/// This is a concrete implementation of [`OnSubscriptionNotification`] that calls a function
+/// when an event occurs.
+pub struct EventCallback {
+    /// The actual call back
+    cb: Box<dyn Fn(&EventNotificationList) + Send + Sync + 'static>
+}
+
+impl OnSubscriptionNotification for EventCallback {
+    fn on_event(&mut self, events: &EventNotificationList) {
+        (self.cb)(events);
+    }
+}
+
+impl EventCallback {
+    /// Constructs a callback from the supplied function
+    pub fn new<CB>(cb: CB) -> Self where CB: Fn(&EventNotificationList) + Send + Sync + 'static {
         Self {
             cb: Box::new(cb)
         }
@@ -65,7 +103,7 @@ impl fmt::Debug for ConnectionStatusCallback {
 }
 
 impl OnConnectionStatusChange for ConnectionStatusCallback {
-    fn connection_status_change(&mut self, connected: bool) {
+    fn on_connection_status_change(&mut self, connected: bool) {
         if connected {
             debug!("Received OPC UA connected event");
         } else {
@@ -89,7 +127,7 @@ pub struct SessionClosedCallback {
 }
 
 impl OnSessionClosed for SessionClosedCallback {
-    fn session_closed(&mut self, status_code: StatusCode) {
+    fn on_session_closed(&mut self, status_code: StatusCode) {
         (self.cb)(status_code);
     }
 }

@@ -1,9 +1,17 @@
+//! Contains the implementation of `VariableType` and `VariableTypeBuilder`.
+
 use std::convert::TryFrom;
 
 use opcua_types::service_types::VariableTypeAttributes;
 
-use crate::address_space::{base::Base, node::Node, node::NodeAttributes};
+use crate::address_space::{base::Base, node::NodeBase, node::Node};
 
+node_builder_impl!(VariableTypeBuilder, VariableType);
+
+node_builder_impl_generates_event!(VariableTypeBuilder);
+node_builder_impl_subtype!(VariableTypeBuilder);
+
+/// A `VariableType` is a type of node within the `AddressSpace`.
 #[derive(Debug)]
 pub struct VariableType {
     base: Base,
@@ -14,76 +22,74 @@ pub struct VariableType {
     array_dimensions: Option<Vec<u32>>,
 }
 
-node_impl!(VariableType);
+impl Default for VariableType {
+    fn default() -> Self {
+        Self {
+            base: Base::new(NodeClass::VariableType, &NodeId::null(), "", ""),
+            data_type: NodeId::null(),
+            is_abstract: false,
+            value_rank: -1,
+            value: None,
+            array_dimensions: None,
+        }
+    }
+}
 
-impl NodeAttributes for VariableType {
-    fn get_attribute(&self, attribute_id: AttributeId, max_age: f64) -> Option<DataValue> {
-        self.base.get_attribute(attribute_id, max_age).or_else(|| {
-            if attribute_id == AttributeId::Value {
-                self.value()
-            } else {
-                match attribute_id {
-                    AttributeId::DataType => Some(Variant::from(self.data_type())),
-                    AttributeId::IsAbstract => Some(Variant::from(self.is_abstract())),
-                    AttributeId::ValueRank => Some(Variant::from(self.value_rank())),
-                    // Optional attributes
-                    AttributeId::ArrayDimensions => {
-                        if let Some(array_dimensions) = self.array_dimensions() {
-                            Some(Variant::from(array_dimensions))
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None
-                }.map(|v| v.into())
-            }
-        })
+node_base_impl!(VariableType);
+
+impl Node for VariableType {
+    fn get_attribute_max_age(&self, attribute_id: AttributeId, max_age: f64) -> Option<DataValue> {
+        match attribute_id {
+            AttributeId::Value => self.value(),
+            AttributeId::DataType => Some(Variant::from(self.data_type()).into()),
+            AttributeId::IsAbstract => Some(Variant::from(self.is_abstract()).into()),
+            AttributeId::ValueRank => Some(Variant::from(self.value_rank()).into()),
+            // Optional attributes
+            AttributeId::ArrayDimensions => self.array_dimensions().map(|v| Variant::from(v).into()),
+            _ => self.base.get_attribute_max_age(attribute_id, max_age)
+        }
     }
 
     fn set_attribute(&mut self, attribute_id: AttributeId, value: Variant) -> Result<(), StatusCode> {
-        if let Some(value) = self.base.set_attribute(attribute_id, value)? {
-            match attribute_id {
-                AttributeId::DataType => {
-                    if let Variant::NodeId(v) = value {
-                        self.set_data_type(*v);
-                        Ok(())
-                    } else {
-                        Err(StatusCode::BadTypeMismatch)
-                    }
-                }
-                AttributeId::IsAbstract => {
-                    if let Variant::Boolean(v) = value {
-                        self.set_is_abstract(v);
-                        Ok(())
-                    } else {
-                        Err(StatusCode::BadTypeMismatch)
-                    }
-                }
-                AttributeId::ValueRank => {
-                    if let Variant::Int32(v) = value {
-                        self.set_value_rank(v);
-                        Ok(())
-                    } else {
-                        Err(StatusCode::BadTypeMismatch)
-                    }
-                }
-                AttributeId::Value => {
-                    self.set_value(value);
+        match attribute_id {
+            AttributeId::DataType => {
+                if let Variant::NodeId(v) = value {
+                    self.set_data_type(*v);
                     Ok(())
+                } else {
+                    Err(StatusCode::BadTypeMismatch)
                 }
-                AttributeId::ArrayDimensions => {
-                    let array_dimensions = <Vec<u32>>::try_from(&value);
-                    if let Ok(array_dimensions) = array_dimensions {
-                        self.set_array_dimensions(&array_dimensions);
-                        Ok(())
-                    } else {
-                        Err(StatusCode::BadTypeMismatch)
-                    }
-                }
-                _ => Err(StatusCode::BadAttributeIdInvalid)
             }
-        } else {
-            Ok(())
+            AttributeId::IsAbstract => {
+                if let Variant::Boolean(v) = value {
+                    self.set_is_abstract(v);
+                    Ok(())
+                } else {
+                    Err(StatusCode::BadTypeMismatch)
+                }
+            }
+            AttributeId::ValueRank => {
+                if let Variant::Int32(v) = value {
+                    self.set_value_rank(v);
+                    Ok(())
+                } else {
+                    Err(StatusCode::BadTypeMismatch)
+                }
+            }
+            AttributeId::Value => {
+                self.set_value(value);
+                Ok(())
+            }
+            AttributeId::ArrayDimensions => {
+                let array_dimensions = <Vec<u32>>::try_from(&value);
+                if let Ok(array_dimensions) = array_dimensions {
+                    self.set_array_dimensions(&array_dimensions);
+                    Ok(())
+                } else {
+                    Err(StatusCode::BadTypeMismatch)
+                }
+            }
+            _ => self.base.set_attribute(attribute_id, value)
         }
     }
 }
@@ -134,6 +140,10 @@ impl VariableType {
         }
     }
 
+    pub fn is_valid(&self) -> bool {
+        self.base.is_valid()
+    }
+
     pub fn data_type(&self) -> NodeId {
         self.data_type.clone()
     }
@@ -171,15 +181,6 @@ impl VariableType {
     }
 
     pub fn set_value<V>(&mut self, value: V) where V: Into<Variant> {
-        let value = value.into();
-        let value = if let Variant::DataValue(v) = value {
-            // A variant containing a datavalue is treated as though that should be
-            // the datavalue to set.
-            *v
-        } else {
-            // Otherwise wrap the variant in a datavalue
-            value.into()
-        };
-        self.value = Some(value);
+        self.value = Some(DataValue::new(value));
     }
 }

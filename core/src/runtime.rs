@@ -5,6 +5,8 @@ use std::{
 
 use crate::trace_lock_unwrap;
 
+/// The `Runtime` is for debugging / diagnostics purposes and tracks which substantial system objects
+/// components are in existence. It can be used to detect if something has shutdown or not.
 pub struct Runtime {
     /// This is a list of the currently running components / threads / tasks in the server,
     /// useful for debugging.
@@ -22,12 +24,13 @@ impl Default for Runtime {
 impl Runtime {
     pub fn components(&self) -> Vec<String> {
         let running_components = trace_lock_unwrap!(self.running_components);
-        running_components.iter().map(|k| k.clone()).collect()
+        running_components.iter().cloned().collect()
     }
 
     pub fn register_component<T>(&self, name: T) where T: Into<String> {
-        let mut running_components = trace_lock_unwrap!(self.running_components);
         let key = name.into();
+        debug!("deregistering component {}", key);
+        let mut running_components = trace_lock_unwrap!(self.running_components);
         if running_components.contains(&key) {
             trace!("Shouldn't be registering component {} more than once", key);
         }
@@ -35,8 +38,9 @@ impl Runtime {
     }
 
     pub fn deregister_component<T>(&self, name: T) where T: Into<String> {
-        let mut running_components = trace_lock_unwrap!(self.running_components);
         let key = name.into();
+        debug!("deregistering component {}", key);
+        let mut running_components = trace_lock_unwrap!(self.running_components);
         if !running_components.contains(&key) {
             trace!("Shouldn't be deregistering component {} which doesn't exist", key);
         }

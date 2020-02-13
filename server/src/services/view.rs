@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use opcua_types::*;
 use opcua_types::status_code::StatusCode;
 use opcua_types::node_ids::ReferenceTypeId;
-use opcua_types::service_types::*;
+
+use opcua_core::crypto::random;
 
 use crate::{
     address_space::{AddressSpace, relative_path},
@@ -48,14 +49,31 @@ impl ViewService {
                 info!("Browse request ignored because view was specified (views not supported)");
                 Ok(self.service_fault(&request.request_header, StatusCode::BadViewIdUnknown))
             } else {
+                // debug!("Browse request = {:#?}", request);
                 let nodes_to_browse = request.nodes_to_browse.as_ref().unwrap();
-                let results = Some(Self::browse_nodes(session, address_space, nodes_to_browse, request.requested_max_references_per_node as usize));
+
+                // Max references per node. This should be server configurable but the constant
+                // is generous.
+                const DEFAULT_MAX_REFERENCES_PER_NODE: u32 = 256;
+                let max_references_per_node = if request.requested_max_references_per_node == 0 {
+                    // Client imposes no limit
+                    DEFAULT_MAX_REFERENCES_PER_NODE
+                } else if request.requested_max_references_per_node > DEFAULT_MAX_REFERENCES_PER_NODE {
+                    // Client limit exceeds default
+                    DEFAULT_MAX_REFERENCES_PER_NODE
+                } else {
+                    request.requested_max_references_per_node
+                };
+
+                // Browse the nodes
+                let results = Some(Self::browse_nodes(session, address_space, nodes_to_browse, max_references_per_node as usize));
                 let diagnostic_infos = None;
                 let response = BrowseResponse {
                     response_header: ResponseHeader::new_good(&request.request_header),
                     results,
                     diagnostic_infos,
                 };
+                // debug!("Browse response = {:#?}", response);
                 Ok(response.into())
             }
         }
@@ -241,7 +259,7 @@ impl ViewService {
             if idx < starting_index {
                 continue;
             }
-            let target_node_id = reference.target_node_id.clone();
+            let target_node_id = reference.target_node.clone();
             if target_node_id.is_null() {
                 continue;
             }
@@ -260,7 +278,7 @@ impl ViewService {
 
             // Prepare the values to put into the struct according to the result mask
             let reference_type_id = if result_mask.contains(BrowseDescriptionResultMask::RESULT_MASK_REFERENCE_TYPE) {
-                reference.reference_type_id.clone()
+                reference.reference_type.clone()
             } else {
                 NodeId::null()
             };
@@ -291,9 +309,9 @@ impl ViewService {
                 // shall be returned.
                 match target_node_class {
                     NodeClass::Object | NodeClass::Variable => {
-                        let type_defs = address_space.find_references_from(&target_node.node_id(), Some((ReferenceTypeId::HasTypeDefinition, false)));
+                        let type_defs = address_space.find_references(&target_node.node_id(), Some((ReferenceTypeId::HasTypeDefinition, false)));
                         if let Some(type_defs) = type_defs {
-                            ExpandedNodeId::new(type_defs[0].target_node_id.clone())
+                            ExpandedNodeId::new(type_defs[0].target_node.clone())
                         } else {
                             ExpandedNodeId::null()
                         }
@@ -350,7 +368,7 @@ impl ViewService {
             //  be factored to allow for that
 
             // Create a continuation point for the remainder of the result. The point will hold the entire result
-            let continuation_point = ByteString::random(6);
+            let continuation_point = random::byte_string(6);
             session.add_browse_continuation_point(BrowseContinuationPoint {
                 id: continuation_point.clone(),
                 address_space_last_modified: address_space.last_modified(),

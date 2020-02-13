@@ -3,12 +3,16 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::collections::{BTreeMap, BTreeSet};
 
-use opcua_types::{MessageSecurityMode, UAString, DecodingLimits};
-use opcua_types::constants as opcua_types_constants;
-use opcua_types::url_matches_except_host;
+use opcua_types::{
+    MessageSecurityMode, UAString, DecodingLimits,
+    constants as opcua_types_constants,
+    url_matches_except_host,
+};
 
-use opcua_core::crypto::SecurityPolicy;
-use opcua_core::config::Config;
+use opcua_core::{
+    crypto::{SecurityPolicy, Thumbprint, CertificateStore},
+    config::Config,
+};
 
 use crate::constants;
 
@@ -31,41 +35,113 @@ pub struct ServerUserToken {
     /// Password
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pass: Option<String>,
-    // X509 file path
+    // X509 file path (as a string)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub x509: Option<PathBuf>,
+    pub x509: Option<String>,
+    #[serde(skip)]
+    pub thumbprint: Option<Thumbprint>,
 }
 
 impl ServerUserToken {
-    pub fn new_user_pass<T>(user: T, pass: T) -> Self where T: Into<String> {
+    /// Create a user pass token
+    pub fn user_pass<T>(user: T, pass: T) -> Self where T: Into<String> {
         ServerUserToken {
             user: user.into(),
             pass: Some(pass.into()),
             x509: None,
+            thumbprint: None,
         }
     }
 
+    /// Create an X509 token.
+    pub fn x509<T>(user: T, cert_path: &PathBuf) -> Self where T: Into<String> {
+        ServerUserToken {
+            user: user.into(),
+            pass: None,
+            x509: Some(cert_path.to_string_lossy().to_string()),
+            thumbprint: None,
+        }
+    }
+
+    /// Read an X509 user token's certificate from disk and then hold onto the thumbprint for it.
+    pub fn read_thumbprint(&mut self) {
+        if self.is_x509() && self.thumbprint.is_none() {
+            // As part of validation, we're going to try and load the x509 certificate from disk, and
+            // obtain its thumbprint. This will be used when a session is activated.
+            if let Some(ref x509_path) = self.x509 {
+                let path = PathBuf::from(x509_path);
+                if let Ok(x509) = CertificateStore::read_cert(&path) {
+                    self.thumbprint = Some(x509.thumbprint());
+                }
+            }
+        }
+    }
+
+    /// Test if the token is valid. This does not care for x509 tokens if the cert is present on
+    /// the disk or not.
     pub fn is_valid(&self, id: &str) -> bool {
         let mut valid = true;
         if id == ANONYMOUS_USER_TOKEN_ID {
-            error!("User token {} uses the reserved name \"anonymous\"", id);
+            error!("User token {} is invalid because id is a reserved value, use another value.", id);
             valid = false;
         }
         if self.user.is_empty() {
-            error!("User token {} has an empty user name", id);
+            error!("User token {} has an empty user name.", id);
             valid = false;
         }
         if self.pass.is_some() && self.x509.is_some() {
-            error!("User token {} has a password and a path to an x509 cert", id);
+            error!("User token {} holds a password and certificate info - it cannot be both.", id);
+            valid = false;
+        } else if self.pass.is_none() && self.x509.is_none() {
+            error!("User token {} fails to provide a password or certificate info.", id);
             valid = false;
         }
-        if let Some(ref path) = self.x509 {
-            if !path.exists() || !path.is_file() {
-                error!("User token {} x509 cert does not exist", id);
-                valid = false;
-            }
-        }
         valid
+    }
+
+    pub fn is_user_pass(&self) -> bool {
+        self.x509.is_none()
+    }
+
+    pub fn is_x509(&self) -> bool {
+        self.x509.is_some()
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct ServerLimits {
+    /// Indicates if clients are able to modify the address space through the node management service
+    /// set. This is a very broad flag and is likely to require more fine grained per user control
+    /// in a later revision. By default, this value is `false`
+    pub clients_can_modify_address_space: bool,
+    /// Maximum number of subscriptions in a session, 0 for no limit
+    pub max_subscriptions: u32,
+    /// Maximum number of monitored items per subscription, 0 for no limit
+    pub max_monitored_items_per_sub: u32,
+    /// Max array length in elements
+    pub max_array_length: u32,
+    /// Max string length in characters
+    pub max_string_length: u32,
+    /// Max bytestring length in bytes
+    pub max_byte_string_length: u32,
+    /// Specifies the minimum sampling interval for this server in seconds.
+    pub min_sampling_interval: f64,
+    /// Specifies the minimum publishing interval for this server in seconds.
+    pub min_publishing_interval: f64,
+}
+
+impl Default for ServerLimits {
+    fn default() -> Self {
+        Self {
+            max_array_length: opcua_types_constants::MAX_ARRAY_LENGTH as u32,
+            max_string_length: opcua_types_constants::MAX_STRING_LENGTH as u32,
+            max_byte_string_length: opcua_types_constants::MAX_BYTE_STRING_LENGTH as u32,
+            max_subscriptions: constants::DEFAULT_MAX_SUBSCRIPTIONS,
+            max_monitored_items_per_sub: constants::DEFAULT_MAX_MONITORED_ITEMS_PER_SUB,
+            clients_can_modify_address_space: false,
+            min_sampling_interval: constants::MIN_SAMPLING_INTERVAL,
+            min_publishing_interval: constants::MIN_PUBLISHING_INTERVAL,
+        }
     }
 }
 
@@ -205,9 +281,56 @@ impl ServerEndpoint {
         format!("{}{}", base_endpoint, self.path)
     }
 
+    /// Returns the effective password security policy for the endpoint. This is the explicitly set password
+    /// security policy, or just the regular security policy.
+    pub fn password_security_policy(&self) -> SecurityPolicy {
+        let mut password_security_policy = self.security_policy();
+        if let Some(ref security_policy) = self.password_security_policy {
+            match SecurityPolicy::from_str(security_policy).unwrap() {
+                SecurityPolicy::Unknown => {
+                    panic!("Password security policy {} is unrecognized", security_policy);
+                }
+                security_policy => {
+                    password_security_policy = security_policy;
+                }
+            }
+        }
+        password_security_policy
+    }
+
     /// Test if the endpoint supports anonymous users
     pub fn supports_anonymous(&self) -> bool {
         self.supports_user_token_id(ANONYMOUS_USER_TOKEN_ID)
+    }
+
+    /// Tests if this endpoint supports user pass tokens. It does this by looking to see
+    /// if any of the users allowed to access this endpoint are user pass users.
+    pub fn supports_user_pass(&self, server_tokens: &BTreeMap<String, ServerUserToken>) -> bool {
+        for user_token_id in &self.user_token_ids {
+            if user_token_id != ANONYMOUS_USER_TOKEN_ID {
+                if let Some(user_token) = server_tokens.get(user_token_id) {
+                    if user_token.is_user_pass() {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Tests if this endpoint supports x509 tokens.  It does this by looking to see
+    /// if any of the users allowed to access this endpoint are x509 users.
+    pub fn supports_x509(&self, server_tokens: &BTreeMap<String, ServerUserToken>) -> bool {
+        for user_token_id in &self.user_token_ids {
+            if user_token_id != ANONYMOUS_USER_TOKEN_ID {
+                if let Some(user_token) = server_tokens.get(user_token_id) {
+                    if user_token.is_x509() {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     pub fn supports_user_token_id(&self, id: &str) -> bool {
@@ -236,24 +359,14 @@ pub struct ServerConfig {
     pub discovery_server_url: Option<String>,
     /// tcp configuration information
     pub tcp_config: TcpConfig,
+    /// Server limits
+    pub limits: ServerLimits,
     /// User tokens
     pub user_tokens: BTreeMap<String, ServerUserToken>,
     /// discovery endpoint url which may or may not be the same as the service endpoints below.
     pub discovery_urls: Vec<String>,
     /// Endpoints supported by the server
     pub endpoints: BTreeMap<String, ServerEndpoint>,
-    /// Maximum number of subscriptions in a session
-    pub max_subscriptions: u32,
-    /// Max array length in elements
-    pub max_array_length: u32,
-    /// Max string length in characters
-    pub max_string_length: u32,
-    /// Max bytestring length in bytes
-    pub max_byte_string_length: u32,
-    /// Indicates if clients are able to modify the address space through the node management service
-    /// set. This is a very broad flag and is likely to require more fine grained per user control
-    /// in a later revision. By default, this value is `false`
-    pub clients_can_modify_address_space: bool,
 }
 
 impl Config for ServerConfig {
@@ -273,15 +386,15 @@ impl Config for ServerConfig {
                 valid = false;
             }
         }
-        if self.max_array_length == 0 {
+        if self.limits.max_array_length == 0 {
             error!("Server configuration is invalid. Max array length is invalid");
             valid = false;
         }
-        if self.max_string_length == 0 {
+        if self.limits.max_string_length == 0 {
             error!("Server configuration is invalid. Max string length is invalid");
             valid = false;
         }
-        if self.max_byte_string_length == 0 {
+        if self.limits.max_byte_string_length == 0 {
             error!("Server configuration is invalid. Max byte string length is invalid");
             valid = false;
         }
@@ -292,11 +405,11 @@ impl Config for ServerConfig {
         valid
     }
 
-    fn application_name(&self) -> UAString { UAString::from(self.application_name.as_ref()) }
+    fn application_name(&self) -> UAString { UAString::from(&self.application_name) }
 
-    fn application_uri(&self) -> UAString { UAString::from(self.application_uri.as_ref()) }
+    fn application_uri(&self) -> UAString { UAString::from(&self.application_uri) }
 
-    fn product_uri(&self) -> UAString { UAString::from(self.product_uri.as_ref()) }
+    fn product_uri(&self) -> UAString { UAString::from(&self.product_uri) }
 }
 
 impl Default for ServerConfig {
@@ -315,14 +428,10 @@ impl Default for ServerConfig {
                 port: constants::DEFAULT_RUST_OPC_UA_SERVER_PORT,
                 hello_timeout: constants::DEFAULT_HELLO_TIMEOUT_SECONDS,
             },
+            limits: ServerLimits::default(),
             user_tokens: BTreeMap::new(),
             discovery_urls: Vec::new(),
             endpoints: BTreeMap::new(),
-            max_array_length: opcua_types_constants::MAX_ARRAY_LENGTH as u32,
-            max_string_length: opcua_types_constants::MAX_STRING_LENGTH as u32,
-            max_byte_string_length: opcua_types_constants::MAX_BYTE_STRING_LENGTH as u32,
-            max_subscriptions: constants::DEFAULT_MAX_SUBSCRIPTIONS,
-            clients_can_modify_address_space: false,
         }
     }
 }
@@ -352,27 +461,27 @@ impl ServerConfig {
                 port,
                 hello_timeout: constants::DEFAULT_HELLO_TIMEOUT_SECONDS,
             },
+            limits: ServerLimits::default(),
             user_tokens,
             discovery_urls,
             endpoints,
-            max_array_length: opcua_types_constants::MAX_ARRAY_LENGTH as u32,
-            max_string_length: opcua_types_constants::MAX_STRING_LENGTH as u32,
-            max_byte_string_length: opcua_types_constants::MAX_BYTE_STRING_LENGTH as u32,
-            max_subscriptions: constants::DEFAULT_MAX_SUBSCRIPTIONS,
-            clients_can_modify_address_space: false,
         }
     }
 
     pub fn decoding_limits(&self) -> DecodingLimits {
         DecodingLimits {
-            max_string_length: self.max_string_length as usize,
-            max_byte_string_length: self.max_byte_string_length as usize,
-            max_array_length: self.max_array_length as usize,
+            max_string_length: self.limits.max_string_length as usize,
+            max_byte_string_length: self.limits.max_byte_string_length as usize,
+            max_array_length: self.limits.max_array_length as usize,
         }
     }
 
     pub fn add_endpoint(&mut self, id: &str, endpoint: ServerEndpoint) {
         self.endpoints.insert(id.to_string(), endpoint);
+    }
+
+    pub fn read_x509_thumbprints(&mut self) {
+        self.user_tokens.iter_mut().for_each(|(_, token)| token.read_thumbprint());
     }
 
     /// Returns a opc.tcp://server:port url that paths can be appended onto

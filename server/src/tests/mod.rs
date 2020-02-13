@@ -6,9 +6,7 @@ use time;
 
 use opcua_types::{
     *,
-    node_ids::{ObjectId, ObjectTypeId, DataTypeId, ReferenceTypeId, VariableId},
     status_code::StatusCode,
-    service_types::*,
 };
 
 use opcua_core::{
@@ -31,6 +29,7 @@ use crate::{
 mod address_space;
 mod services;
 mod subscriptions;
+mod events;
 
 fn make_test_file(filename: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
@@ -46,7 +45,7 @@ fn make_sample_address_space() -> AddressSpace {
 
 fn add_sample_vars_to_address_space(address_space: &mut AddressSpace) {
     // Create a sample folder under objects folder
-    let sample_folder_id = address_space.add_folder("Sample", "Sample", &AddressSpace::objects_folder_id()).unwrap();
+    let sample_folder_id = address_space.add_folder("Sample", "Sample", &NodeId::objects_folder_id()).unwrap();
 
     // Add some variables to our sample folder
     let vars = vec![

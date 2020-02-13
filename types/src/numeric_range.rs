@@ -32,7 +32,7 @@ use crate::variant::Variant;
 ///
 /// All indexes start with `0`. The maximum value for any index is one less than the length of the
 /// dimension.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum NumericRange {
     /// A single index
     Index(u32),
@@ -116,7 +116,7 @@ impl FromStr for NumericRange {
         let parts: Vec<_> = s.split(',').collect();
         match parts.len() {
             1 => Self::parse_range(&parts[0]),
-            2...MAX_INDICES => {
+            2..=MAX_INDICES => {
                 // Multi dimensions
                 let mut ranges = Vec::with_capacity(parts.len());
                 for p in &parts {

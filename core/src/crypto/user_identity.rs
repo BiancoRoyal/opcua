@@ -7,17 +7,16 @@ use std::io::{Cursor, Write};
 use std::str::FromStr;
 
 use opcua_types::{
-    UAString, ByteString,
+    ByteString, encoding::{read_u32, write_u32},
+    service_types::{SignatureData, UserNameIdentityToken, UserTokenPolicy, X509IdentityToken},
     status_code::StatusCode,
-    encoding::{write_u32, read_u32},
-    service_types::{UserTokenPolicy, UserNameIdentityToken},
+    UAString,
 };
 
-use super::{X509, PrivateKey, KeySize, SecurityPolicy, RsaPadding};
-use opcua_types::service_types::{X509IdentityToken, SignatureData};
+use super::{KeySize, PrivateKey, RsaPadding, SecurityPolicy, X509};
 
 /// Create a filled in UserNameIdentityToken by using the supplied channel security policy, user token policy, nonce, cert, user name and password.
-pub fn make_user_name_identity_token(channel_security_policy: SecurityPolicy, user_token_policy: &UserTokenPolicy, nonce: &[u8], cert: Option<X509>, user: &str, pass: &str) -> Result<UserNameIdentityToken, StatusCode> {
+pub fn make_user_name_identity_token(channel_security_policy: SecurityPolicy, user_token_policy: &UserTokenPolicy, nonce: &[u8], cert: &Option<X509>, user: &str, pass: &str) -> Result<UserNameIdentityToken, StatusCode> {
     // Create a user token security policy by looking at the uri it wants to use
     let token_security_policy = if user_token_policy.security_policy_uri.is_empty() {
         SecurityPolicy::None
@@ -32,9 +31,7 @@ pub fn make_user_name_identity_token(channel_security_policy: SecurityPolicy, us
 
     // Table 179 Opc Part 4 provides a table of which encryption algorithm to use
     let security_policy = if channel_security_policy == SecurityPolicy::None {
-        if user_token_policy.security_policy_uri.is_empty() {
-            SecurityPolicy::None
-        } else if token_security_policy != SecurityPolicy::None {
+        if user_token_policy.security_policy_uri.is_empty() || token_security_policy != SecurityPolicy::None {
             SecurityPolicy::None
         } else {
             token_security_policy
@@ -46,8 +43,6 @@ pub fn make_user_name_identity_token(channel_security_policy: SecurityPolicy, us
             token_security_policy
         } else if channel_security_policy == token_security_policy {
             token_security_policy
-        } else if token_security_policy == SecurityPolicy::None {
-            SecurityPolicy::None
         } else {
             SecurityPolicy::None
         }
@@ -69,7 +64,7 @@ pub fn make_user_name_identity_token(channel_security_policy: SecurityPolicy, us
         }
         security_policy => {
             // Create a password which is encrypted using the secure channel info and the user token policy for the endpoint
-            let password = legacy_password_encrypt(pass, nonce, &cert.unwrap(), security_policy.padding())?;
+            let password = legacy_password_encrypt(pass, nonce, cert.as_ref().unwrap(), security_policy.padding())?;
             let encryption_algorithm = UAString::from(security_policy.asymmetric_encryption_algorithm());
             (password, encryption_algorithm)
         }
@@ -77,7 +72,7 @@ pub fn make_user_name_identity_token(channel_security_policy: SecurityPolicy, us
 
     Ok(UserNameIdentityToken {
         policy_id: user_token_policy.policy_id.clone(),
-        user_name: UAString::from(user.as_ref()),
+        user_name: UAString::from(user),
         password,
         encryption_algorithm,
     })
@@ -116,7 +111,8 @@ pub(crate) fn legacy_password_encrypt(password: &str, server_nonce: &[u8], serve
 
     let cipher_size = public_key.calculate_cipher_text_size(plaintext_size, padding);
     let mut dst = vec![0u8; cipher_size];
-    let actual_size = public_key.public_encrypt(&src.into_inner(), &mut dst, padding).map_err(|_| StatusCode::BadEncodingError)?;
+    let actual_size = public_key.public_encrypt(&src.into_inner(), &mut dst, padding)
+        .map_err(|_| StatusCode::BadEncodingError)?;
 
     assert_eq!(actual_size, cipher_size);
 
@@ -132,10 +128,10 @@ pub(crate) fn legacy_password_decrypt(secret: &ByteString, server_nonce: &[u8], 
         // Decrypt the message
         let src = secret.value.as_ref().unwrap();
         let mut dst = vec![0u8; src.len()];
-        let actual_size = server_key.private_decrypt(&src, &mut dst, padding).map_err(|_| StatusCode::BadEncodingError)?;
+        let actual_size = server_key.private_decrypt(&src, &mut dst, padding)
+            .map_err(|_| StatusCode::BadEncodingError)?;
 
         let mut dst = Cursor::new(dst);
-
         let plaintext_size = read_u32(&mut dst)? as usize;
         if plaintext_size + 4 != actual_size {
             Err(StatusCode::BadDecodingError)
@@ -156,9 +152,10 @@ pub(crate) fn legacy_password_decrypt(secret: &ByteString, server_nonce: &[u8], 
     }
 }
 
+/// Verify that the X509 identity token supplied to a server contains a valid signature.
 pub fn verify_x509_identity_token(token: &X509IdentityToken, user_token_signature: &SignatureData, security_policy: SecurityPolicy, server_cert: &X509, server_nonce: &[u8]) -> Result<(), StatusCode> {
     // Since it is not obvious at all from the spec what the user token signature is supposed to be, I looked
-    // at the internet for answers
+    // at the internet for clues:
     //
     // https://stackoverflow.com/questions/46683342/securing-opensecurechannel-messages-and-x509identitytoken
     // https://forum.prosysopc.com/forum/opc-ua/clarification-on-opensecurechannel-messages-and-x509identitytoken-specifications/
@@ -166,7 +163,8 @@ pub fn verify_x509_identity_token(token: &X509IdentityToken, user_token_signatur
     // These suggest that the signature is produced by appending the server nonce to the server certificate
     // and signing with the user certificate's private key.
     //
-    // More or less like the standard handshake between client and server but with the identity cert.
+    // This is the same as the standard handshake between client and server but using the identity cert. It would have been nice
+    // if the spec actually said this.
 
     let signing_cert = super::x509::X509::from_byte_string(&token.certificate_data)?;
     let result = super::verify_signature_data(user_token_signature, security_policy, &signing_cert, server_cert, server_nonce);

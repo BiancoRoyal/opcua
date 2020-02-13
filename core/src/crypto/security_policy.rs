@@ -6,9 +6,9 @@ use std::str::FromStr;
 use openssl::hash as openssl_hash;
 
 use opcua_types::{
-    status_code::StatusCode,
     ByteString,
     constants,
+    status_code::StatusCode,
 };
 
 use crate::{
@@ -17,6 +17,7 @@ use crate::{
         aeskey::AesKey,
         pkey::{PrivateKey, PublicKey, RsaPadding, KeySize},
         hash,
+        random,
     }
 };
 
@@ -194,7 +195,7 @@ impl FromStr for SecurityPolicy {
             constants::SECURITY_POLICY_BASIC_256 | constants::SECURITY_POLICY_BASIC_256_URI => SecurityPolicy::Basic256,
             constants::SECURITY_POLICY_BASIC_256_SHA_256 | constants::SECURITY_POLICY_BASIC_256_SHA_256_URI => SecurityPolicy::Basic256Sha256,
             _ => {
-                error!("Specified security policy {} is not recognized", s);
+                error!("Specified security policy \"{}\" is not recognized", s);
                 SecurityPolicy::Unknown
             }
         })
@@ -343,7 +344,7 @@ impl SecurityPolicy {
             SecurityPolicy::None => ByteString::null(),
             SecurityPolicy::Basic128Rsa15 |
             SecurityPolicy::Basic256 |
-            SecurityPolicy::Basic256Sha256 => ByteString::random(self.symmetric_key_size()),
+            SecurityPolicy::Basic256Sha256 => random::byte_string(self.symmetric_key_size()),
             _ => {
                 panic!("Cannot make a nonce because key size is unknown");
             }
@@ -357,7 +358,7 @@ impl SecurityPolicy {
             constants::SECURITY_POLICY_BASIC_256_URI => SecurityPolicy::Basic256,
             constants::SECURITY_POLICY_BASIC_256_SHA_256_URI => SecurityPolicy::Basic256Sha256,
             _ => {
-                error!("Specified security policy {} is not recognized", uri);
+                error!("Specified security policy uri \"{}\" is not recognized", uri);
                 SecurityPolicy::Unknown
             }
         }
@@ -475,7 +476,6 @@ impl SecurityPolicy {
                 self.asymmetric_sign(&their_key, data, their_signature.as_mut_slice())?;
                 trace!("Using their_key, signature should be {:?}", &their_signature);
             }
-
             Err(StatusCode::BadSecurityChecksFailed)
         }
     }

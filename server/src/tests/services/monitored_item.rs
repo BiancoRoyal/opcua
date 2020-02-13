@@ -5,8 +5,10 @@ use chrono::{self, Utc};
 
 use crate::{
     prelude::*,
-    subscriptions::subscription::{TickReason, SubscriptionState},
-    subscriptions::monitored_item::*,
+    subscriptions::{
+        subscription::{TickReason, SubscriptionState},
+        monitored_item::*,
+    },
     services::{
         subscription::SubscriptionService,
         monitored_item::MonitoredItemService,
@@ -18,28 +20,34 @@ fn test_var_node_id() -> NodeId {
     NodeId::new(1, 1)
 }
 
+fn test_object_node_id() -> NodeId {
+    NodeId::new(1, 1000)
+}
+
 fn make_address_space() -> AddressSpace {
     let mut address_space = AddressSpace::new();
-    let _ = address_space.add_variable(Variable::new(&NodeId::new(1, 1), "test1", "test1", 0u32), &AddressSpace::objects_folder_id());
-    let _ = address_space.add_variable(Variable::new(&NodeId::new(1, 2), "test2", "test2", 0u32), &AddressSpace::objects_folder_id());
-    let _ = address_space.add_variable(Variable::new(&NodeId::new(1, 3), "test3", "test3", 0u32), &AddressSpace::objects_folder_id());
-    let _ = address_space.add_variable(Variable::new(&NodeId::new(1, 4), "test4", "test4", 0u32), &AddressSpace::objects_folder_id());
-    let _ = address_space.add_variable(Variable::new(&NodeId::new(1, 5), "test5", "test5 ", 0u32), &AddressSpace::objects_folder_id());
+    (1..=5).for_each(|i| {
+        let id = format!("test{}", i);
+        VariableBuilder::new(&NodeId::new(1, i), &id, &id)
+            .value(0u32)
+            .organized_by(ObjectId::ObjectsFolder)
+            .insert(&mut address_space);
+    });
+
+    // An object for event filter
+    ObjectBuilder::new(&test_object_node_id(), "Object1", "")
+        .organized_by(ObjectId::ObjectsFolder)
+        .event_notifier(EventNotifier::SUBSCRIBE_TO_EVENTS)
+        .insert(&mut address_space);
+
     address_space
 }
 
-fn make_create_request(sampling_interval: Duration, queue_size: u32) -> MonitoredItemCreateRequest {
-    // Encode a filter to an extension object
-    let filter = ExtensionObject::from_encodable(ObjectId::DataChangeFilter_Encoding_DefaultBinary, &DataChangeFilter {
-        trigger: DataChangeTrigger::StatusValueTimestamp,
-        deadband_type: 0,
-        deadband_value: 0f64,
-    });
-
+fn make_create_request(sampling_interval: Duration, queue_size: u32, node_id: NodeId, attribute_id: AttributeId, filter: ExtensionObject) -> MonitoredItemCreateRequest {
     MonitoredItemCreateRequest {
         item_to_monitor: ReadValueId {
-            node_id: test_var_node_id(),
-            attribute_id: AttributeId::Value as u32,
+            node_id,
+            attribute_id: attribute_id as u32,
             index_range: UAString::null(),
             data_encoding: QualifiedName::null(),
         },
@@ -54,9 +62,32 @@ fn make_create_request(sampling_interval: Duration, queue_size: u32) -> Monitore
     }
 }
 
+fn make_create_request_data_change_filter(sampling_interval: Duration, queue_size: u32) -> MonitoredItemCreateRequest {
+    // Encode a filter to an extension object
+    let filter = ExtensionObject::from_encodable(ObjectId::DataChangeFilter_Encoding_DefaultBinary, &DataChangeFilter {
+        trigger: DataChangeTrigger::StatusValueTimestamp,
+        deadband_type: DeadbandType::None as u32,
+        deadband_value: 0f64,
+    });
+    make_create_request(sampling_interval, queue_size, test_var_node_id(), AttributeId::Value, filter)
+}
+
+fn make_create_request_event_filter(sampling_interval: Duration, queue_size: u32) -> MonitoredItemCreateRequest {
+    let filter = ExtensionObject::from_encodable(ObjectId::EventFilter_Encoding_DefaultBinary, &EventFilter {
+        where_clause: ContentFilter {
+            elements: None
+        },
+        select_clauses: Some(vec![
+            SimpleAttributeOperand::new(ObjectTypeId::BaseEventType, "EventId", AttributeId::Value, UAString::null()),
+            SimpleAttributeOperand::new(ObjectTypeId::BaseEventType, "SourceNode", AttributeId::Value, UAString::null()),
+        ]),
+    });
+    make_create_request(sampling_interval, queue_size, test_object_node_id(), AttributeId::EventNotifier, filter)
+}
+
 fn set_monitoring_mode(session: &mut Session, subscription_id: u32, monitored_item_id: u32, monitoring_mode: MonitoringMode, mis: &MonitoredItemService) {
     let request = SetMonitoringModeRequest {
-        request_header: RequestHeader::new(&NodeId::null(), &DateTime::now(), 1),
+        request_header: RequestHeader::dummy(),
         subscription_id,
         monitoring_mode,
         monitored_item_ids: Some(vec![monitored_item_id]),
@@ -69,7 +100,7 @@ fn set_monitoring_mode(session: &mut Session, subscription_id: u32, monitored_it
 
 fn set_triggering(session: &mut Session, subscription_id: u32, monitored_item_id: u32, links_to_add: &[u32], links_to_remove: &[u32], mis: &MonitoredItemService) -> (Option<Vec<StatusCode>>, Option<Vec<StatusCode>>) {
     let request = SetTriggeringRequest {
-        request_header: RequestHeader::new(&NodeId::null(), &DateTime::now(), 1),
+        request_header: RequestHeader::dummy(),
         subscription_id,
         triggering_item_id: monitored_item_id,
         links_to_add: if links_to_add.is_empty() { None } else { Some(links_to_add.to_vec()) },
@@ -82,7 +113,7 @@ fn set_triggering(session: &mut Session, subscription_id: u32, monitored_item_id
 fn publish_request(now: &DateTimeUtc, session: &mut Session, address_space: &AddressSpace, ss: &SubscriptionService) {
     let request_id = 1001;
     let request = PublishRequest {
-        request_header: RequestHeader::new(&NodeId::null(), &DateTime::now(), 1),
+        request_header: RequestHeader::dummy(),
         subscription_acknowledgements: None,
     };
 
@@ -122,7 +153,7 @@ fn publish_tick_response<T>(session: &mut Session, ss: &SubscriptionService, add
 
 fn populate_monitored_item(discard_oldest: bool) -> MonitoredItem {
     let client_handle = 999;
-    let mut monitored_item = MonitoredItem::new(&chrono::Utc::now(), 1, TimestampsToReturn::Both, &make_create_request(-1f64, 5)).unwrap();
+    let mut monitored_item = MonitoredItem::new(&chrono::Utc::now(), 1, TimestampsToReturn::Both, &make_create_request_data_change_filter(-1f64, 5)).unwrap();
     monitored_item.set_discard_oldest(discard_oldest);
     for i in 0..5 {
         monitored_item.enqueue_notification_message(MonitoredItemNotification {
@@ -141,14 +172,19 @@ fn populate_monitored_item(discard_oldest: bool) -> MonitoredItem {
 }
 
 fn assert_first_notification_is_i32(monitored_item: &mut MonitoredItem, value: i32) {
-    assert_eq!(monitored_item.oldest_notification_message().unwrap().value.value.unwrap(), Variant::Int32(value));
+    let notification = monitored_item.oldest_notification_message().unwrap();
+    if let Notification::MonitoredItemNotification(notification) = notification {
+        assert_eq!(notification.value.value.unwrap(), Variant::Int32(value));
+    } else {
+        panic!();
+    }
 }
 
 #[test]
 fn data_change_filter_test() {
     let mut filter = DataChangeFilter {
         trigger: DataChangeTrigger::Status,
-        deadband_type: 0,
+        deadband_type: DeadbandType::None as u32,
         deadband_value: 0f64,
     };
 
@@ -173,11 +209,11 @@ fn data_change_filter_test() {
     assert_eq!(filter.compare(&v1, &v2, None), true);
 
     // Change v1 status
-    v1.status = Some(StatusCode::Good.bits());
+    v1.status = Some(StatusCode::Good);
     assert_eq!(filter.compare(&v1, &v2, None), false);
 
     // Change v2 status
-    v2.status = Some(StatusCode::Good.bits());
+    v2.status = Some(StatusCode::Good);
     assert_eq!(filter.compare(&v1, &v2, None), true);
 
     // Change value - but since trigger is status, this should not matter
@@ -208,7 +244,7 @@ fn data_change_deadband_abs_test() {
     let filter = DataChangeFilter {
         trigger: DataChangeTrigger::StatusValue,
         // Abs compare
-        deadband_type: 1,
+        deadband_type: DeadbandType::Absolute as u32,
         deadband_value: 1f64,
     };
 
@@ -274,7 +310,7 @@ fn monitored_item_data_change_filter() {
 
     // Create request should monitor attribute of variable, e.g. value
     // Sample interval is negative so it will always test on repeated calls
-    let mut monitored_item = MonitoredItem::new(&chrono::Utc::now(), 1, TimestampsToReturn::Both, &make_create_request(-1f64, 5)).unwrap();
+    let mut monitored_item = MonitoredItem::new(&chrono::Utc::now(), 1, TimestampsToReturn::Both, &make_create_request_data_change_filter(-1f64, 5)).unwrap();
 
     let now = Utc::now();
 
@@ -296,9 +332,7 @@ fn monitored_item_data_change_filter() {
 
     // adjust variable value
     if let &mut NodeType::Variable(ref mut node) = address_space.find_node_mut(&test_var_node_id()).unwrap() {
-        let mut value = node.value();
-        value.value = Some(Variant::UInt32(1));
-        node.set_value(value);
+        node.set_value(Variant::UInt32(1));
     } else {
         panic!("Expected a variable, didn't get one!!");
     }
@@ -307,6 +341,68 @@ fn monitored_item_data_change_filter() {
     assert_eq!(monitored_item.tick(&now, &address_space, false, false), TickResult::NoChange);
     assert_eq!(monitored_item.tick(&now, &address_space, true, false), TickResult::ReportValueChanged);
     assert_eq!(monitored_item.notification_queue().len(), 2);
+}
+
+#[test]
+fn monitored_item_event_filter() {
+    // create an address space
+    let mut address_space = make_address_space();
+
+    // Create request should monitor attribute of variable, e.g. value
+    // Sample interval is negative so it will always test on repeated calls
+    let mut monitored_item = MonitoredItem::new(&chrono::Utc::now(), 1, TimestampsToReturn::Both, &make_create_request_event_filter(-1f64, 5)).unwrap();
+
+    let mut now = Utc::now();
+
+    // Verify tick does nothing
+    assert_eq!(monitored_item.tick(&now, &address_space, false, false), TickResult::NoChange);
+
+    now = now + chrono::Duration::milliseconds(100);
+
+    // Raise an event
+    let event_id = NodeId::new(2, "Event1");
+    let event = BaseEventType::new(&event_id, "Event1", "", NodeId::objects_folder_id(), test_object_node_id(), DateTime::from(now));
+    assert!(event.raise(&mut address_space).is_ok());
+
+    // Verify that event comes back
+    assert_eq!(monitored_item.tick(&now, &address_space, true, false), TickResult::ReportValueChanged);
+
+    // Look at monitored item queue
+    assert_eq!(monitored_item.notification_queue().len(), 1);
+    let event = match monitored_item.oldest_notification_message().unwrap() {
+        Notification::Event(event) => event,
+        _ => panic!()
+    };
+
+    // Verify EventFieldList
+    assert_eq!(event.client_handle, 999);
+    let mut event_fields = event.event_fields.unwrap();
+    assert_eq!(event_fields.len(), 2);
+
+    // EventId should be a ByteString, contents of which should be 16 bytes
+    let event_id = event_fields.remove(0);
+    match event_id {
+        Variant::ByteString(value) => assert_eq!(value.value.unwrap().len(), 16),
+        _ => panic!()
+    }
+
+    // Source node should point to the originating object
+    let event_source_node = event_fields.remove(0);
+    match event_source_node {
+        Variant::NodeId(source_node) => assert_eq!(*source_node, test_object_node_id()),
+        _ => panic!()
+    }
+
+    // Tick again (nothing expected)
+    now = now + chrono::Duration::milliseconds(100);
+    assert_eq!(monitored_item.tick(&now, &address_space, false, false), TickResult::NoChange);
+
+    // Raise an event on another object, expect nothing in the tick about it
+    let event_id = NodeId::new(2, "Event2");
+    let event = BaseEventType::new(&event_id, "Event2", "", NodeId::objects_folder_id(), ObjectId::Server, DateTime::from(now));
+    assert!(event.raise(&mut address_space).is_ok());
+    now = now + chrono::Duration::milliseconds(100);
+    assert_eq!(monitored_item.tick(&now, &address_space, false, false), TickResult::NoChange);
 }
 
 #[test]
@@ -330,7 +426,7 @@ fn monitored_item_triggers() {
             NodeId::new(1, var_name(2)),
             NodeId::new(1, var_name(3)),
         ]);
-        let response: CreateMonitoredItemsResponse = supported_message_as!(mis.create_monitored_items(session, &request).unwrap(), CreateMonitoredItemsResponse);
+        let response: CreateMonitoredItemsResponse = supported_message_as!(mis.create_monitored_items(server_state, session, &address_space, &request).unwrap(), CreateMonitoredItemsResponse);
 
         // The first monitored item will be the triggering item, the other 3 will be triggered items
         let monitored_item_ids: Vec<u32> = response.results.unwrap().iter().map(|mir| {
@@ -362,8 +458,9 @@ fn monitored_item_triggers() {
 
         // publish on the monitored item
         let now = publish_tick_response(session, &ss, address_space, now, chrono::Duration::seconds(2), |response| {
-            let notifications = response.notification_message.data_change_notifications(&DecodingLimits::default());
+            let (notifications, events) = response.notification_message.notifications(&DecodingLimits::default()).unwrap();
             assert_eq!(notifications.len(), 1);
+            assert!(events.is_empty());
             let monitored_items = notifications[0].monitored_items.as_ref().unwrap();
             assert_eq!(monitored_items.len(), 3);
             let client_handles: HashSet<u32> = monitored_items.iter().map(|min| min.client_handle).collect();
@@ -389,8 +486,9 @@ fn monitored_item_triggers() {
         // In this case, the triggering item changes, but triggered items are all reporting so are ignored unless they themselves
         // need to report. Only 3 will fire because it was disabled previously
         let now = publish_tick_response(session, &ss, address_space, now, chrono::Duration::seconds(2), |response| {
-            let notifications = response.notification_message.data_change_notifications(&DecodingLimits::default());
+            let (notifications, events) = response.notification_message.notifications(&DecodingLimits::default()).unwrap();
             assert_eq!(notifications.len(), 1);
+            assert!(events.is_empty());
             let monitored_items = notifications[0].monitored_items.as_ref().unwrap();
             let client_handles: HashSet<u32> = monitored_items.iter().map(|min| min.client_handle).collect();
             assert_eq!(monitored_items.len(), 2);
@@ -410,8 +508,9 @@ fn monitored_item_triggers() {
         // do a publish on the monitored item,
         let now = publish_tick_response(session, &ss, address_space, now, chrono::Duration::seconds(2), |response| {
             // expect only 1 data change corresponding to sampling triggered item
-            let notifications = response.notification_message.data_change_notifications(&DecodingLimits::default());
+            let (notifications, events) = response.notification_message.notifications(&DecodingLimits::default()).unwrap();
             assert_eq!(notifications.len(), 1);
+            assert!(events.is_empty());
             let monitored_items = notifications[0].monitored_items.as_ref().unwrap();
             let client_handles: HashSet<u32> = monitored_items.iter().map(|min| min.client_handle).collect();
             assert_eq!(monitored_items.len(), 1);

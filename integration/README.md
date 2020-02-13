@@ -1,11 +1,15 @@
-Integration tests must be run like this:
+Integration tests are to test scenarios between the client and server. 
+
+Since tests create and listen on ports, use pki folders, they must be run one at a time, like this:
 
 ```
 cargo test --features integration -- --test-threads=1
 ```
 
-Each test runs a server against a client and tests functionality such as connecting with different encryption and
-signing levels.
+Or use the `run.sh` or `run-sanity.sh` script.
 
-NOTE: Integration tests are currently broken. Some tokio tasks related to network IO are not terminating which causes 
-the tokio::run on the server to never exit on demand.
+The X509 token required for some tests is in `x509/` and generated like so:
+
+```
+openssl req -x509 -nodes -newkey rsa:4096 -keyout user_private_key.pem -outform der -out user_public_cert.der -days 10000
+```

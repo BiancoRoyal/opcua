@@ -1,14 +1,57 @@
 use std::collections::HashSet;
 
 use opcua_types::{
+    QualifiedName,
     status_code::StatusCode,
     node_id::NodeId,
     service_types::{RelativePath, RelativePathElement},
 };
 
 use crate::{
-    address_space::AddressSpace
+    address_space::{AddressSpace, node::NodeType}
 };
+
+/// Given a browse path consisting of browse names, walk nodes from the root until we find a single node (or not).
+/// This function is a simplified use case for event filters and such like where a browse path
+/// is defined as an array and doesn't need to be parsed out of a relative path. All nodes in the
+/// path must be objects or variables.
+pub(crate) fn find_node_from_browse_path<'a>(address_space: &'a AddressSpace, parent_node_id: &NodeId, browse_path: &[QualifiedName]) -> Result<&'a NodeType, StatusCode> {
+    if browse_path.is_empty() {
+        Err(StatusCode::BadNotFound)
+    } else {
+        // Each instance declaration in the path shall be an object or variable node. The final node in the
+        // path may be an object node; however, object nodes are only available for Events which are
+        // visible in the server's address space
+        let mut parent_node_id = parent_node_id.clone();
+        for browse_name in browse_path {
+            if let Some(child_nodes) = address_space.find_hierarchical_references(&parent_node_id) {
+                let found_node_id = child_nodes.iter().find(|node_id| {
+                    if let Some(node) = address_space.find_node(&node_id) {
+                        if node.as_node().browse_name() == *browse_name {
+                            // Check that the node is an Object or Variable
+                            match node {
+                                NodeType::Object(_) | NodeType::Variable(_) => true,
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                });
+                if let Some(found_node_id) = found_node_id {
+                    parent_node_id = found_node_id.clone();
+                } else {
+                    return Err(StatusCode::BadNotFound);
+                }
+            } else {
+                return Err(StatusCode::BadNotFound);
+            }
+        }
+        Ok(address_space.find_node(&parent_node_id).unwrap())
+    }
+}
 
 /// Given a `RelativePath`, find all the nodes that match against it.
 pub(crate) fn find_nodes_relative_path(address_space: &AddressSpace, node_id: &NodeId, relative_path: &RelativePath) -> Result<Vec<NodeId>, StatusCode> {
@@ -68,24 +111,25 @@ fn follow_relative_path(address_space: &AddressSpace, node_id: &NodeId, relative
     let reference_type_id = relative_path.reference_type_id.as_reference_type_id().unwrap();
     let reference_filter = Some((reference_type_id, relative_path.include_subtypes));
     let references = if relative_path.is_inverse {
-        address_space.find_references_to(node_id, reference_filter)
+        address_space.find_inverse_references(node_id, reference_filter)
     } else {
-        address_space.find_references_from(node_id, reference_filter)
+        address_space.find_references(node_id, reference_filter)
     };
     if let Some(references) = references {
         let compare_target_name = !relative_path.target_name.is_null();
         let mut result = Vec::with_capacity(references.len());
         for reference in &references {
-            if let Some(node) = address_space.find_node(&reference.target_node_id) {
+            if let Some(node) = address_space.find_node(&reference.target_node) {
                 let node = node.as_node();
                 if !compare_target_name || node.browse_name() == relative_path.target_name {
-                    result.push(reference.target_node_id.clone());
+                    result.push(reference.target_node.clone());
                 }
             }
         }
         // Vector may contain duplicates, so reduce those to a unique set
-        let mut result: HashSet<NodeId> = result.drain(..).collect();
-        Some(result.drain().collect())
+        let result = result.into_iter().collect::<HashSet<NodeId>>();
+        // Now the result as a vec
+        Some(result.into_iter().collect())
     } else {
         None
     }

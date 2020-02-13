@@ -1,4 +1,4 @@
-//! The OPC UA Server module contains all server side functionality - address space, services,
+//! The OPC UA Server module contains the server side functionality - address space, services,
 //! server security, session management, local discovery server registration and subscriptions.
 //!
 //! # Usage
@@ -12,7 +12,7 @@
 //!
 //! # Example
 //!
-//! This is a minimal server which runs with the default address space on the default port.
+//! This is a very simple server which runs with the default address space on the default port.
 //! 
 //!  ```no_run
 //!  use opcua_server::prelude::*;
@@ -46,10 +46,23 @@ macro_rules! is_empty_option_vec {
     }
 }
 
+/// Matches macro taken from matches crate
+macro_rules! matches {
+    ($expression:expr, $($pattern:tt)+) => {
+        match $expression {
+            $($pattern)+ => true,
+            _ => false
+        }
+    }
+}
+
 mod services;
-mod session;
+
+#[cfg(feature = "discovery-server-registration")]
 mod discovery;
-mod completion_pact;
+
+#[cfg(feature = "http")]
+pub mod http;
 
 pub mod comms;
 pub mod metrics;
@@ -62,21 +75,24 @@ pub mod config;
 pub mod address_space;
 pub mod util;
 pub mod continuation_point;
-#[cfg(feature = "http")]
-pub mod http;
 pub mod callbacks;
+pub mod events;
+pub mod session;
 
 pub mod prelude {
     //! Provides a way to use most types and functions commonly used by server implementations from a
     //! single use statement.
     pub use opcua_types::status_code::StatusCode;
+    pub use opcua_types::*;
     pub use opcua_types::service_types::*;
     pub use opcua_core::prelude::*;
     pub use crate::{
         address_space::types::*,
+        address_space::{AccessLevel, EventNotifier, UserAccessLevel},
         builder::*,
         callbacks::*,
         config::*,
+        events::event::*,
         server::*,
         subscriptions::*,
         util::*,
@@ -86,18 +102,20 @@ pub mod prelude {
 pub mod constants {
     //! Provides constants that govern the internal workings of the server implementation.
     /// The default hello timeout period in seconds
-    pub const DEFAULT_HELLO_TIMEOUT_SECONDS: u32 = 120;
+    pub const DEFAULT_HELLO_TIMEOUT_SECONDS: u32 = 5;
     /// Default OPC UA server port for this implementation
     pub const DEFAULT_RUST_OPC_UA_SERVER_PORT: u16 = 4855;
     /// Default maximum number of subscriptions in a session
     pub const DEFAULT_MAX_SUBSCRIPTIONS: u32 = 100;
+    /// Default maximum number of monitored items per subscription
+    pub const DEFAULT_MAX_MONITORED_ITEMS_PER_SUB: u32 = 1000;
     /// Default, well known address for TCP discovery server
     pub const DEFAULT_DISCOVERY_SERVER_URL: &str = "opc.tcp://localhost:4840/UADiscovery";
 
     // Internally controlled values
 
     /// The polling interval in millis on subscriptions and monitored items. The more
-    /// finegrained this is, the more often subscriptions will be checked for changes. The minimum
+    /// fine-grained this is, the more often subscriptions will be checked for changes. The minimum
     /// publish interval cannot be less than this.
     pub const SUBSCRIPTION_TIMER_RATE_MS: u64 = 100;
     /// Minimum publishing interval for subscriptions
@@ -117,7 +135,7 @@ pub mod constants {
     pub const MAX_REQUEST_MESSAGE_SIZE: u32 = 32768;
     /// Default keep alive count
     pub const DEFAULT_KEEP_ALIVE_COUNT: u32 = 10;
-    /// Maxmimum keep alive count
+    /// Maximum keep alive count
     pub const MAX_KEEP_ALIVE_COUNT: u32 = 30000;
     /// Maximum browse continuation points
     pub const MAX_BROWSE_CONTINUATION_POINTS: usize = 10;

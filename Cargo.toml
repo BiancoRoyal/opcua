@@ -16,9 +16,9 @@ members = [
     "samples/demo-server",
     "samples/simple-client",
     "samples/mqtt-client",
-    "samples/gfx-client",
     "samples/simple-server",
     "samples/chess-server",
+    "samples/modbus-server",
     "samples/discovery-client",
     "samples/web-client",
     "tools/certificate-creator"

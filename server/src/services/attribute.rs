@@ -2,7 +2,6 @@ use std::result::Result;
 
 use opcua_types::*;
 use opcua_types::status_code::StatusCode;
-use opcua_types::service_types::*;
 
 use crate::{
     services::Service,
@@ -21,9 +20,7 @@ impl AttributeService {
         AttributeService {}
     }
 
-    /// Spec:
-    ///
-    /// This Service is used to read historical values or Events of one or more Nodes. For
+    /// Used to read historical values or Events of one or more Nodes. For
     /// constructed Attribute values whose elements are indexed, such as an array, this Service
     /// allows Clients to read the entire set of indexed values as a composite, to read individual
     /// elements or to read ranges of elements of the composite. Servers may make historical
@@ -55,9 +52,7 @@ impl AttributeService {
         }
     }
 
-    /// Spec:
-    ///
-    /// This Service is used to write values to one or more Attributes of one or more Nodes. For
+    /// Used to write values to one or more Attributes of one or more Nodes. For
     /// constructed Attribute values whose elements are indexed, such as an array, this Service
     /// allows Clients to write the entire set of indexed values as a composite, to write individual
     /// elements or to write ranges of elements of the composite.
@@ -91,13 +86,13 @@ impl AttributeService {
         // Node node found
         if let Some(node) = address_space.find_node(&node_to_read.node_id) {
             if let Ok(attribute_id) = AttributeId::from_u32(node_to_read.attribute_id) {
-                if let Some(attribute) = node.as_node().get_attribute(attribute_id, max_age) {
+                if let Some(attribute) = node.as_node().get_attribute_max_age(attribute_id, max_age) {
                     let is_readable = Self::is_readable(&node);
                     if !is_readable {
-                        result_value.status = Some(StatusCode::BadNotReadable.bits())
+                        result_value.status = Some(StatusCode::BadNotReadable)
                     } else if !node_to_read.index_range.is_null() {
                         // Index ranges are not supported
-                        result_value.status = Some(StatusCode::BadNotReadable.bits());
+                        result_value.status = Some(StatusCode::BadNotReadable);
                     } else {
                         // Result value is clone from the attribute
                         result_value.value = attribute.value.clone();
@@ -118,21 +113,21 @@ impl AttributeService {
                                 result_value.server_timestamp = attribute.server_timestamp.clone();
                                 result_value.server_picoseconds = attribute.server_picoseconds;
                             }
-                            TimestampsToReturn::Neither => {
+                            TimestampsToReturn::Neither | TimestampsToReturn::Invalid => {
                                 // Nothing needs to change
                             }
                         }
                     }
                 } else {
-                    result_value.status = Some(StatusCode::BadAttributeIdInvalid.bits());
+                    result_value.status = Some(StatusCode::BadAttributeIdInvalid);
                 }
             } else {
                 warn!("Attribute id {} is invalid", node_to_read.attribute_id);
-                result_value.status = Some(StatusCode::BadAttributeIdInvalid.bits());
+                result_value.status = Some(StatusCode::BadAttributeIdInvalid);
             }
         } else {
             warn!("Cannot find node id {:?}", node_to_read.node_id);
-            result_value.status = Some(StatusCode::BadNodeIdUnknown.bits());
+            result_value.status = Some(StatusCode::BadNodeIdUnknown);
         }
         result_value
     }
@@ -182,8 +177,6 @@ impl AttributeService {
     }
 
     fn is_writable(node: &NodeType, attribute_id: AttributeId) -> bool {
-        use opcua_types::WriteMask;
-
         // For a variable, the access level controls access to the variable
         if let NodeType::Variable(ref node) = node {
             if attribute_id == AttributeId::Value {

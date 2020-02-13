@@ -9,7 +9,7 @@ use crate::{
     node_ids::*,
     node_id::{Identifier, NodeId},
     service_types::{RelativePath, RelativePathElement},
-    basic_types::QualifiedName,
+    qualified_name::QualifiedName,
     string::UAString,
 };
 
@@ -198,6 +198,8 @@ impl RelativePathElement {
         lazy_static! {
             static ref RE: Regex = Regex::new(r"(?P<reftype>/|\.|(<(?P<flags>#|!|#!)?((?P<nsidx>[0-9]+):)?(?P<name>[^#!].*)>))(?P<target>.*)").unwrap();
         }
+
+        // NOTE: This could be more safely done with a parser library, e.g. nom.
 
         if let Some(captures) = RE.captures(&path) {
             let target_name = target_name(captures.name("target").unwrap().as_str())?;
@@ -390,7 +392,7 @@ fn test_escape_browse_name() {
 /// and a RelativePathElement type
 #[test]
 fn test_relative_path_element() {
-    use crate::basic_types::QualifiedName;
+    use crate::qualified_name::QualifiedName;
 
     [
         (RelativePathElement {
@@ -447,10 +449,10 @@ fn test_relative_path_element() {
 /// and a RelativePath type.
 #[test]
 fn test_relative_path() {
-    use crate::basic_types::QualifiedName;
+    use crate::qualified_name::QualifiedName;
 
     // Samples are from OPC UA Part 4 Appendix A
-    let mut tests = vec![
+    let tests = vec![
         (vec![
             RelativePathElement {
                 reference_type_id: ReferenceTypeId::HierarchicalReferences.into(),
@@ -527,7 +529,7 @@ fn test_relative_path() {
         ], "<HasChild>"),
     ];
 
-    tests.drain(..).for_each(|n| {
+    tests.into_iter().for_each(|n| {
         let relative_path = RelativePath {
             elements: Some(n.0)
         };

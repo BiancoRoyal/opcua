@@ -1,6 +1,11 @@
-use std;
-use std::u32;
-use std::sync::{Arc, RwLock};
+use std::{
+    self,
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicU32, Ordering},
+    },
+    u32,
+};
 
 use chrono;
 
@@ -9,14 +14,15 @@ use opcua_core::{
     crypto::SecurityPolicy,
     handle::Handle,
 };
-
 use opcua_types::{
     *,
-    service_types::*,
     status_code::StatusCode,
 };
 
-use crate::{message_queue::MessageQueue, callbacks::OnSessionClosed};
+use crate::{
+    callbacks::{OnSessionClosed, OnConnectionStatusChange},
+    message_queue::MessageQueue,
+};
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum ConnectionState {
@@ -34,9 +40,15 @@ pub enum ConnectionState {
     Finished(StatusCode),
 }
 
+lazy_static! {
+    static ref NEXT_SESSION_ID: AtomicU32 = AtomicU32::new(1);
+}
+
 /// Session's state indicates connection status, negotiated times and sizes,
 /// and security tokens.
 pub(crate) struct SessionState {
+    /// A unique identifier for the session, this is NOT the session id assigned after a session is created
+    id: u32,
     /// Secure channel information
     secure_channel: Arc<RwLock<SecureChannel>>,
     /// Connection state - what the session's connection is currently doing
@@ -50,7 +62,7 @@ pub(crate) struct SessionState {
     receive_buffer_size: usize,
     /// Maximum message size
     max_message_size: usize,
-    /// The session's id - used for diagnostic info
+    /// The session's id assigned after a connection and used for diagnostic info
     session_id: NodeId,
     /// The sesion authentication token, used for session activation
     authentication_token: NodeId,
@@ -67,13 +79,15 @@ pub(crate) struct SessionState {
     message_queue: Arc<RwLock<MessageQueue>>,
     /// Connection closed callback
     session_closed_callback: Option<Box<dyn OnSessionClosed + Send + Sync + 'static>>,
+    /// Connection status callback
+    connection_status_callback: Option<Box<dyn OnConnectionStatusChange + Send + Sync + 'static>>,
 }
 
 impl OnSessionClosed for SessionState {
-    fn session_closed(&mut self, status_code: StatusCode) {
+    fn on_session_closed(&mut self, status_code: StatusCode) {
         debug!("Session was closed with status = {}", status_code);
         if let Some(ref mut session_closed_callback) = self.session_closed_callback {
-            session_closed_callback.session_closed(status_code);
+            session_closed_callback.on_session_closed(status_code);
         }
     }
 }
@@ -97,7 +111,9 @@ impl SessionState {
     const SYNC_POLLING_PERIOD: u64 = 50;
 
     pub fn new(secure_channel: Arc<RwLock<SecureChannel>>, message_queue: Arc<RwLock<MessageQueue>>) -> SessionState {
+        let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
         SessionState {
+            id,
             secure_channel,
             connection_state: Arc::new(RwLock::new(ConnectionState::NotStarted)),
             request_timeout: Self::DEFAULT_REQUEST_TIMEOUT,
@@ -112,7 +128,12 @@ impl SessionState {
             subscription_acknowledgements: Vec::new(),
             wait_for_publish_response: false,
             session_closed_callback: None,
+            connection_status_callback: None,
         }
+    }
+
+    pub fn id(&self) -> u32 {
+        self.id
     }
 
     pub fn set_session_id(&mut self, session_id: NodeId) {
@@ -147,9 +168,9 @@ impl SessionState {
         self.subscription_acknowledgements.push(subscription_acknowledgement);
     }
 
-    pub fn authentication_token(&self) -> &NodeId {
-        &self.authentication_token
-    }
+    //pub fn authentication_token(&self) -> &NodeId {
+    //    &self.authentication_tokenPOL
+    //}
 
     pub fn set_authentication_token(&mut self, authentication_token: NodeId) {
         self.authentication_token = authentication_token;
@@ -157,6 +178,16 @@ impl SessionState {
 
     pub fn set_session_closed_callback<CB>(&mut self, session_closed_callback: CB) where CB: OnSessionClosed + Send + Sync + 'static {
         self.session_closed_callback = Some(Box::new(session_closed_callback));
+    }
+
+    pub fn set_connection_status_callback<CB>(&mut self, connection_status_callback: CB) where CB: OnConnectionStatusChange + Send + Sync + 'static {
+        self.connection_status_callback = Some(Box::new(connection_status_callback));
+    }
+
+    pub(crate) fn on_connection_status_change(&mut self, connected: bool) {
+        if let Some(ref mut connection_status) = self.connection_status_callback {
+            connection_status.on_connection_status_change(connected);
+        }
     }
 
     pub(crate) fn connection_state(&self) -> Arc<RwLock<ConnectionState>> {
@@ -243,6 +274,11 @@ impl SessionState {
         self.add_request(request, is_async);
 
         Ok(request_handle)
+    }
+
+    pub(crate) fn quit(&mut self) {
+        let mut message_queue = trace_write_lock_unwrap!(self.message_queue);
+        message_queue.quit();
     }
 
     /// Wait for a response with a matching request handle. If request handle is 0 then no match
