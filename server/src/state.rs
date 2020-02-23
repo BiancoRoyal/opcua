@@ -19,7 +19,10 @@ use crate::{
     callbacks::{RegisterNodes, UnregisterNodes},
     config::{ServerConfig, ServerEndpoint},
     diagnostics::ServerDiagnostics,
-    events::audit::AuditLog,
+    events::{
+        audit::{AuditEvent, AuditLog},
+        event::Event,
+    },
     historical::{HistoricalDataProvider, HistoricalEventProvider},
 };
 
@@ -80,7 +83,7 @@ pub struct ServerState {
     /// Audit log
     pub(crate) audit_log: Arc<RwLock<AuditLog>>,
     /// Diagnostic information
-    pub diagnostics: Arc<RwLock<ServerDiagnostics>>,
+    pub(crate) diagnostics: Arc<RwLock<ServerDiagnostics>>,
     /// Callback for register nodes
     pub(crate) register_nodes_callback: Option<Box<dyn RegisterNodes + Send + Sync>>,
     /// Callback for unregister nodes
@@ -139,6 +142,8 @@ impl ServerState {
             SecurityPolicy::None => POLICY_ID_USER_PASS_NONE,
             SecurityPolicy::Basic128Rsa15 => POLICY_ID_USER_PASS_RSA_15,
             SecurityPolicy::Basic256 | SecurityPolicy::Basic256Sha256 => POLICY_ID_USER_PASS_RSA_OAEP,
+            // TODO this is a placeholder
+            SecurityPolicy::Aes128Sha256RsaOaep | SecurityPolicy::Aes256Sha256RsaPss => POLICY_ID_USER_PASS_RSA_OAEP,
             _ => { panic!() }
         }.into()
     }
@@ -505,5 +510,10 @@ impl ServerState {
 
     pub fn set_historical_event_provider(&mut self, historical_event_provider: Box<dyn HistoricalEventProvider + Send + Sync>) {
         self.historical_event_provider = Some(historical_event_provider);
+    }
+
+    pub(crate) fn raise_and_log<T>(&self, event: T) -> Result<NodeId, ()> where T: AuditEvent + Event {
+        let audit_log = trace_write_lock_unwrap!(self.audit_log);
+        audit_log.raise_and_log(event)
     }
 }
