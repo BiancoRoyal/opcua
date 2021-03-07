@@ -4,12 +4,27 @@
 
 //! Contains the implementation of `ExtensionObject`.
 
-use std::io::{Cursor, Read, Write};
+use std::{
+    error::Error,
+    fmt,
+    io::{Cursor, Read, Write},
+};
 
 use crate::{
     byte_string::ByteString, encoding::*, node_id::NodeId, node_ids::ObjectId,
     status_codes::StatusCode, string::XmlElement,
 };
+
+#[derive(Debug)]
+pub struct ExtensionObjectError;
+
+impl fmt::Display for ExtensionObjectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ExtensionObjectError")
+    }
+}
+
+impl Error for ExtensionObjectError {}
 
 /// Enumeration that holds the kinds of encoding that an ExtensionObject data may be encoded with.
 #[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
@@ -104,17 +119,15 @@ impl ExtensionObject {
 
     /// Tests for empty body.
     pub fn is_empty(&self) -> bool {
-        self.is_null()
-            || match self.body {
-                ExtensionObjectEncoding::None => true,
-                _ => false,
-            }
+        self.is_null() || matches!(self.body, ExtensionObjectEncoding::None)
     }
 
     /// Returns the object id of the thing this extension object contains, assuming the
     /// object id can be recognised from the node id.
-    pub fn object_id(&self) -> Result<ObjectId, ()> {
-        self.node_id.as_object_id()
+    pub fn object_id(&self) -> Result<ObjectId, ExtensionObjectError> {
+        self.node_id
+            .as_object_id()
+            .map_err(|_| ExtensionObjectError)
     }
 
     /// Creates an extension object with the specified node id and the encodable object as its payload.

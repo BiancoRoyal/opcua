@@ -121,6 +121,8 @@ pub enum SessionCommand {
 pub struct Session {
     /// The client application's name.
     application_description: ApplicationDescription,
+    /// A name for the session, supplied during create
+    session_name: UAString,
     /// The session connection info.
     session_info: SessionInfo,
     /// Runtime state of the session, reset if disconnected.
@@ -164,15 +166,21 @@ impl Session {
     ///
     /// * `Session` - the interface that shall be used to communicate between the client and the server.
     ///
-    pub(crate) fn new(
+    pub(crate) fn new<T>(
         application_description: ApplicationDescription,
+        session_name: T,
         certificate_store: Arc<RwLock<CertificateStore>>,
         session_info: SessionInfo,
         session_retry_policy: SessionRetryPolicy,
         single_threaded_executor: bool,
-    ) -> Session {
+    ) -> Session
+    where
+        T: Into<UAString>,
+    {
         // TODO take these from the client config
         let decoding_limits = DecodingLimits::default();
+
+        let session_name = session_name.into();
 
         let secure_channel = Arc::new(RwLock::new(SecureChannel::new(
             certificate_store.clone(),
@@ -198,6 +206,7 @@ impl Session {
         );
         Session {
             application_description,
+            session_name,
             session_info,
             session_state,
             certificate_store,
@@ -370,10 +379,8 @@ impl Session {
         if let Some(subscription_ids) = subscription_ids {
             // Try to use TransferSubscriptions to move subscriptions_ids over. If this
             // works then there is nothing else to do.
-            let mut subscription_ids_to_recreate = subscription_ids
-                .iter()
-                .map(|s| *s)
-                .collect::<HashSet<u32>>();
+            let mut subscription_ids_to_recreate =
+                subscription_ids.iter().copied().collect::<HashSet<u32>>();
             if let Ok(transfer_results) = self.transfer_subscriptions(&subscription_ids, true) {
                 session_debug!(self, "transfer_results = {:?}", transfer_results);
                 transfer_results.iter().enumerate().for_each(|(i, r)| {
@@ -942,7 +949,7 @@ impl Session {
         };
 
         let server_uri = UAString::null();
-        let session_name = UAString::from("Rust OPCUA Client");
+        let session_name = self.session_name.clone();
 
         let (client_certificate, _) = {
             let certificate_store = trace_write_lock_unwrap!(self.certificate_store);
@@ -1065,7 +1072,7 @@ impl Session {
 
         let session_state = self.session_state.clone();
         let connection_state_take_while = connection_state.clone();
-        let connection_state_for_each = connection_state.clone();
+        let connection_state_for_each = connection_state;
 
         // Session activity will happen every 3/4 of the timeout period
         const MIN_SESSION_ACTIVITY_MS: u64 = 1000;
@@ -1086,10 +1093,7 @@ impl Session {
         let task = Interval::new(Instant::now(), Duration::from_millis(MIN_SESSION_ACTIVITY_MS))
             .take_while(move |_| {
                 let connection_state = trace_read_lock_unwrap!(connection_state_take_while);
-                let terminated = match *connection_state {
-                    ConnectionState::Finished(_) => true,
-                    _ => false
-                };
+                let terminated = matches!(*connection_state, ConnectionState::Finished(_));
                 future::ok(!terminated)
             })
             .for_each(move |_| {
@@ -1141,7 +1145,7 @@ impl Session {
             } else {
                 tokio::runtime::current_thread::run(task);
             }
-            deregister_runtime_component!(thread_id.clone());
+            deregister_runtime_component!(thread_id);
         });
     }
 

@@ -91,8 +91,8 @@ impl From<&str> for LiteralOperand {
 }
 
 impl From<()> for LiteralOperand {
-    fn from(v: ()) -> Self {
-        Self::from(Variant::from(v))
+    fn from(_v: ()) -> Self {
+        Self::from(Variant::from(()))
     }
 }
 
@@ -250,11 +250,17 @@ pub struct ContentFilterBuilder {
     elements: Vec<ContentFilterElement>,
 }
 
-impl ContentFilterBuilder {
-    pub fn new() -> Self {
+impl Default for ContentFilterBuilder {
+    fn default() -> Self {
         ContentFilterBuilder {
             elements: Vec::with_capacity(20),
         }
+    }
+}
+
+impl ContentFilterBuilder {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     fn add_element(
@@ -262,10 +268,7 @@ impl ContentFilterBuilder {
         filter_operator: FilterOperator,
         filter_operands: Vec<Operand>,
     ) -> Self {
-        let filter_operands = filter_operands
-            .iter()
-            .map(|o| ExtensionObject::from(o))
-            .collect();
+        let filter_operands = filter_operands.iter().map(ExtensionObject::from).collect();
         self.elements.push(ContentFilterElement {
             filter_operator,
             filter_operands: Some(filter_operands),
@@ -273,7 +276,7 @@ impl ContentFilterBuilder {
         self
     }
 
-    pub fn is_eq<T, S>(self, o1: T, o2: S) -> Self
+    pub fn eq<T, S>(self, o1: T, o2: S) -> Self
     where
         T: Into<Operand>,
         S: Into<Operand>,
@@ -281,14 +284,14 @@ impl ContentFilterBuilder {
         self.add_element(FilterOperator::Equals, vec![o1.into(), o2.into()])
     }
 
-    pub fn is_null<T>(self, o1: T) -> Self
+    pub fn null<T>(self, o1: T) -> Self
     where
         T: Into<Operand>,
     {
         self.add_element(FilterOperator::IsNull, vec![o1.into()])
     }
 
-    pub fn is_gt<T, S>(self, o1: T, o2: S) -> Self
+    pub fn gt<T, S>(self, o1: T, o2: S) -> Self
     where
         T: Into<Operand>,
         S: Into<Operand>,
@@ -296,7 +299,7 @@ impl ContentFilterBuilder {
         self.add_element(FilterOperator::GreaterThan, vec![o1.into(), o2.into()])
     }
 
-    pub fn is_lt<T, S>(self, o1: T, o2: S) -> Self
+    pub fn lt<T, S>(self, o1: T, o2: S) -> Self
     where
         T: Into<Operand>,
         S: Into<Operand>,
@@ -304,7 +307,7 @@ impl ContentFilterBuilder {
         self.add_element(FilterOperator::LessThan, vec![o1.into(), o2.into()])
     }
 
-    pub fn is_gte<T, S>(self, o1: T, o2: S) -> Self
+    pub fn gte<T, S>(self, o1: T, o2: S) -> Self
     where
         T: Into<Operand>,
         S: Into<Operand>,
@@ -315,7 +318,7 @@ impl ContentFilterBuilder {
         )
     }
 
-    pub fn is_lte<T, S>(self, o1: T, o2: S) -> Self
+    pub fn lte<T, S>(self, o1: T, o2: S) -> Self
     where
         T: Into<Operand>,
         S: Into<Operand>,
@@ -323,7 +326,7 @@ impl ContentFilterBuilder {
         self.add_element(FilterOperator::LessThanOrEqual, vec![o1.into(), o2.into()])
     }
 
-    pub fn is_like<T, S>(self, o1: T, o2: S) -> Self
+    pub fn like<T, S>(self, o1: T, o2: S) -> Self
     where
         T: Into<Operand>,
         S: Into<Operand>,
@@ -338,7 +341,7 @@ impl ContentFilterBuilder {
         self.add_element(FilterOperator::Not, vec![o1.into()])
     }
 
-    pub fn is_between<T, S, U>(self, o1: T, o2: S, o3: U) -> Self
+    pub fn between<T, S, U>(self, o1: T, o2: S, o3: U) -> Self
     where
         T: Into<Operand>,
         S: Into<Operand>,
@@ -350,7 +353,7 @@ impl ContentFilterBuilder {
         )
     }
 
-    pub fn is_in_list<T, S>(self, o1: T, list_items: Vec<S>) -> Self
+    pub fn in_list<T, S>(self, o1: T, list_items: Vec<S>) -> Self
     where
         T: Into<Operand>,
         S: Into<Operand>,
@@ -429,7 +432,7 @@ impl SimpleAttributeOperand {
         // matches only if the pattern `/` isn't preceded by a backslash. Unfortunately the regex crate doesn't offer
         // this so an escaped forward slash is replaced with an improbable string instead.
         let browse_path = browse_path
-            .split("/")
+            .split('/')
             .map(|s| QualifiedName::new(0, s.replace(ESCAPE_PATTERN, "/")))
             .collect();
         SimpleAttributeOperand {

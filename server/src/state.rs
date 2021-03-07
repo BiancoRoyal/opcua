@@ -350,13 +350,7 @@ impl ServerState {
         if config.discovery_urls.is_empty() {
             None
         } else {
-            Some(
-                config
-                    .discovery_urls
-                    .iter()
-                    .map(|url| UAString::from(url))
-                    .collect(),
-            )
+            Some(config.discovery_urls.iter().map(UAString::from).collect())
         }
     }
 
@@ -558,7 +552,7 @@ impl ServerState {
             for user_token_id in &endpoint.user_token_ids {
                 if let Some(server_user_token) = config.user_tokens.get(user_token_id) {
                     if server_user_token.is_user_pass()
-                        && &server_user_token.user == token.user_name.as_ref()
+                        && server_user_token.user == token.user_name.as_ref()
                     {
                         // test for empty password
                         let valid = if server_user_token.pass.is_none() {
@@ -616,7 +610,7 @@ impl ServerState {
                         .iter()
                         .find(|t| t.token_type == UserTokenType::Certificate)
                         .map(|t| SecurityPolicy::from_uri(t.security_policy_uri.as_ref()))
-                        .unwrap_or(endpoint.security_policy());
+                        .unwrap_or_else(|| endpoint.security_policy());
 
                     // The security policy has to be something that can encrypt
                     match security_policy {

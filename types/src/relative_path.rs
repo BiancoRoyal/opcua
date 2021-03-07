@@ -7,6 +7,8 @@
 //! Functions are implemented on the `RelativePath` and `RelativePathElement` structs where
 //! there are most useful.
 //!
+use std::{error::Error, fmt};
+
 use regex::Regex;
 
 use crate::{
@@ -16,6 +18,17 @@ use crate::{
     service_types::{RelativePath, RelativePathElement},
     string::UAString,
 };
+
+#[derive(Debug)]
+struct RelativePathError;
+
+impl fmt::Display for RelativePathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RelativePathError")
+    }
+}
+
+impl Error for RelativePathError {}
 
 impl RelativePath {
     /// The maximum size in chars of any path element.
@@ -259,7 +272,7 @@ impl RelativePathElement {
                     // Process the token as a reference type
                     let reference_type_id = if let Some(namespace) = captures.name("nsidx") {
                         let namespace = namespace.as_str();
-                        if namespace == "0" || namespace == "" {
+                        if namespace == "0" || namespace.is_empty() {
                             node_resolver(0, browse_name)
                         } else if let Ok(namespace) = namespace.parse::<u16>() {
                             node_resolver(namespace, browse_name)
