@@ -1,3 +1,7 @@
+// OPCUA for Rust
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (C) 2017-2020 Adam Lock
+
 //! Contains the definition of `QualifiedName`.
 use std::io::{Read, Write};
 
@@ -68,7 +72,10 @@ impl BinaryEncoder<QualifiedName> for QualifiedName {
 }
 
 impl QualifiedName {
-    pub fn new<T>(namespace_index: u16, name: T) -> QualifiedName where T: Into<UAString> {
+    pub fn new<T>(namespace_index: u16, name: T) -> QualifiedName
+    where
+        T: Into<UAString>,
+    {
         QualifiedName {
             namespace_index,
             name: name.into(),

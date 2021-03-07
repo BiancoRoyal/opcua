@@ -1,8 +1,6 @@
 use crate::{
     address_space::{
-        EventNotifier,
-        references::Reference,
-        relative_path::find_node_from_browse_path,
+        references::Reference, relative_path::find_node_from_browse_path, EventNotifier,
     },
     callbacks,
     prelude::*,
@@ -27,8 +25,16 @@ fn address_space() {
 fn namespaces() {
     // Test that namespaces are listed properly
     let mut address_space = AddressSpace::new();
-    assert_eq!(address_space.namespace_index("http://opcfoundation.org/UA/").unwrap(), 0u16);
-    assert_eq!(address_space.namespace_index("urn:OPCUA-Rust-Internal").unwrap(), 1u16);
+
+    let ns = address_space.register_namespace("urn:test").unwrap();
+
+    assert_eq!(
+        address_space
+            .namespace_index("http://opcfoundation.org/UA/")
+            .unwrap(),
+        0u16
+    );
+    assert_eq!(address_space.namespace_index("urn:test").unwrap(), ns);
     // Error
     assert_eq!(address_space.register_namespace(""), Err(()));
     // Add new namespaces
@@ -69,7 +75,6 @@ fn find_views_folder() {
     let node_type = address_space.find(ObjectId::ViewsFolder);
     assert!(node_type.is_some());
 }
-
 
 #[test]
 fn find_common_nodes() {
@@ -136,23 +141,26 @@ fn object_attributes() {
     assert_eq!(o.display_name(), LocalizedText::new("", "Display01"));
 }
 
-
 #[test]
 fn find_node_by_id() {
     let address_space = make_sample_address_space();
-    let address_space = trace_read_lock_unwrap!(address_space);
+    let mut address_space = trace_write_lock_unwrap!(address_space);
+    let ns = address_space.register_namespace("urn:test").unwrap();
 
     assert!(!address_space.node_exists(&NodeId::null()));
     assert!(!address_space.node_exists(&NodeId::new(11, "v3")));
 
-    assert!(address_space.node_exists(&NodeId::new(1, "v1")));
-    assert!(address_space.node_exists(&NodeId::new(2, 300)));
-    assert!(address_space.node_exists(&NodeId::new(1, "v3")));
+    assert!(address_space.node_exists(&NodeId::new(ns, "v1")));
+    assert!(address_space.node_exists(&NodeId::new(ns, 300)));
+    assert!(address_space.node_exists(&NodeId::new(ns, "v3")));
 }
 
 fn dump_references(references: &Vec<Reference>) {
     for r in references {
-        println!("Referencs - type = {:?}, to = {:?}", r.reference_type, r.target_node);
+        println!(
+            "Referencs - type = {:?}, to = {:?}",
+            r.reference_type, r.target_node
+        );
     }
 }
 
@@ -161,29 +169,50 @@ fn find_references_by_direction() {
     let address_space = make_sample_address_space();
     let address_space = trace_read_lock_unwrap!(address_space);
 
-    let (references, _inverse_ref_idx) = address_space.find_references_by_direction::<ReferenceTypeId>(&NodeId::objects_folder_id(), BrowseDirection::Forward, None);
+    let (references, _inverse_ref_idx) = address_space
+        .find_references_by_direction::<ReferenceTypeId>(
+            &NodeId::objects_folder_id(),
+            BrowseDirection::Forward,
+            None,
+        );
     dump_references(&references);
     assert_eq!(references.len(), 3);
 
     // Should be same as filtering on None
     let reference_filter = Some((ReferenceTypeId::References, true));
-    let (references, _inverse_ref_idx) = address_space.find_references_by_direction(&NodeId::objects_folder_id(), BrowseDirection::Forward, reference_filter);
+    let (references, _inverse_ref_idx) = address_space.find_references_by_direction(
+        &NodeId::objects_folder_id(),
+        BrowseDirection::Forward,
+        reference_filter,
+    );
     dump_references(&references);
     assert_eq!(references.len(), 3);
 
     // Only organizes
     let reference_filter = Some((ReferenceTypeId::Organizes, false));
-    let (references, _inverse_ref_idx) = address_space.find_references_by_direction(&NodeId::objects_folder_id(), BrowseDirection::Forward, reference_filter);
+    let (references, _inverse_ref_idx) = address_space.find_references_by_direction(
+        &NodeId::objects_folder_id(),
+        BrowseDirection::Forward,
+        reference_filter,
+    );
     dump_references(&references);
     assert_eq!(references.len(), 2);
 
     // Reverse organises should == 1 (root organises objects)
-    let (references, _inverse_ref_idx) = address_space.find_references_by_direction(&NodeId::objects_folder_id(), BrowseDirection::Inverse, reference_filter);
+    let (references, _inverse_ref_idx) = address_space.find_references_by_direction(
+        &NodeId::objects_folder_id(),
+        BrowseDirection::Inverse,
+        reference_filter,
+    );
     dump_references(&references);
     assert_eq!(references.len(), 1);
 
     // Both directions
-    let (references, inverse_ref_idx) = address_space.find_references_by_direction(&NodeId::objects_folder_id(), BrowseDirection::Both, reference_filter);
+    let (references, inverse_ref_idx) = address_space.find_references_by_direction(
+        &NodeId::objects_folder_id(),
+        BrowseDirection::Both,
+        reference_filter,
+    );
     dump_references(&references);
     assert_eq!(references.len(), 3);
     assert_eq!(inverse_ref_idx, 2);
@@ -194,19 +223,26 @@ fn find_references() {
     let address_space = make_sample_address_space();
     let address_space = trace_read_lock_unwrap!(address_space);
 
-    let references = address_space.find_references(&NodeId::root_folder_id(), Some((ReferenceTypeId::Organizes, false)));
+    let references = address_space.find_references(
+        &NodeId::root_folder_id(),
+        Some((ReferenceTypeId::Organizes, false)),
+    );
     assert!(references.is_some());
     let references = references.as_ref().unwrap();
     dump_references(&references);
     assert_eq!(references.len(), 3);
 
-    let references = address_space.find_references::<ReferenceTypeId>(&NodeId::root_folder_id(), None);
+    let references =
+        address_space.find_references::<ReferenceTypeId>(&NodeId::root_folder_id(), None);
     assert!(references.is_some());
     let references = references.as_ref().unwrap();
     dump_references(&references);
     assert_eq!(references.len(), 4);
 
-    let references = address_space.find_references(&NodeId::objects_folder_id(), Some((ReferenceTypeId::Organizes, false)));
+    let references = address_space.find_references(
+        &NodeId::objects_folder_id(),
+        Some((ReferenceTypeId::Organizes, false)),
+    );
     assert!(references.is_some());
     let references = references.unwrap();
     dump_references(&references);
@@ -226,10 +262,16 @@ fn find_inverse_references() {
     let address_space = trace_read_lock_unwrap!(address_space);
 
     //println!("{:#?}", address_space);
-    let references = address_space.find_inverse_references(&NodeId::root_folder_id(), Some((ReferenceTypeId::Organizes, false)));
+    let references = address_space.find_inverse_references(
+        &NodeId::root_folder_id(),
+        Some((ReferenceTypeId::Organizes, false)),
+    );
     assert!(references.is_none());
 
-    let references = address_space.find_inverse_references(&NodeId::objects_folder_id(), Some((ReferenceTypeId::Organizes, false)));
+    let references = address_space.find_inverse_references(
+        &NodeId::objects_folder_id(),
+        Some((ReferenceTypeId::Organizes, false)),
+    );
     assert!(references.is_some());
     let references = references.unwrap();
     assert_eq!(references.len(), 1);
@@ -242,57 +284,152 @@ fn find_reference_subtypes() {
 
     let references = address_space.references();
     let reference_types = vec![
-        (ReferenceTypeId::References, ReferenceTypeId::HierarchicalReferences),
+        (
+            ReferenceTypeId::References,
+            ReferenceTypeId::HierarchicalReferences,
+        ),
         (ReferenceTypeId::References, ReferenceTypeId::HasChild),
         (ReferenceTypeId::References, ReferenceTypeId::HasSubtype),
         (ReferenceTypeId::References, ReferenceTypeId::Organizes),
         (ReferenceTypeId::References, ReferenceTypeId::Aggregates),
         (ReferenceTypeId::References, ReferenceTypeId::HasProperty),
         (ReferenceTypeId::References, ReferenceTypeId::HasComponent),
-        (ReferenceTypeId::References, ReferenceTypeId::HasOrderedComponent),
+        (
+            ReferenceTypeId::References,
+            ReferenceTypeId::HasOrderedComponent,
+        ),
         (ReferenceTypeId::References, ReferenceTypeId::HasEventSource),
         (ReferenceTypeId::References, ReferenceTypeId::HasNotifier),
         (ReferenceTypeId::References, ReferenceTypeId::GeneratesEvent),
-        (ReferenceTypeId::References, ReferenceTypeId::AlwaysGeneratesEvent),
+        (
+            ReferenceTypeId::References,
+            ReferenceTypeId::AlwaysGeneratesEvent,
+        ),
         (ReferenceTypeId::References, ReferenceTypeId::HasEncoding),
-        (ReferenceTypeId::References, ReferenceTypeId::HasModellingRule),
+        (
+            ReferenceTypeId::References,
+            ReferenceTypeId::HasModellingRule,
+        ),
         (ReferenceTypeId::References, ReferenceTypeId::HasDescription),
-        (ReferenceTypeId::References, ReferenceTypeId::HasTypeDefinition),
-        (ReferenceTypeId::HierarchicalReferences, ReferenceTypeId::HasChild),
-        (ReferenceTypeId::HierarchicalReferences, ReferenceTypeId::HasSubtype),
-        (ReferenceTypeId::HierarchicalReferences, ReferenceTypeId::Organizes),
-        (ReferenceTypeId::HierarchicalReferences, ReferenceTypeId::Aggregates),
-        (ReferenceTypeId::HierarchicalReferences, ReferenceTypeId::HasProperty),
-        (ReferenceTypeId::HierarchicalReferences, ReferenceTypeId::HasComponent),
-        (ReferenceTypeId::HierarchicalReferences, ReferenceTypeId::HasOrderedComponent),
-        (ReferenceTypeId::HierarchicalReferences, ReferenceTypeId::HasEventSource),
-        (ReferenceTypeId::HierarchicalReferences, ReferenceTypeId::HasNotifier),
+        (
+            ReferenceTypeId::References,
+            ReferenceTypeId::HasTypeDefinition,
+        ),
+        (
+            ReferenceTypeId::HierarchicalReferences,
+            ReferenceTypeId::HasChild,
+        ),
+        (
+            ReferenceTypeId::HierarchicalReferences,
+            ReferenceTypeId::HasSubtype,
+        ),
+        (
+            ReferenceTypeId::HierarchicalReferences,
+            ReferenceTypeId::Organizes,
+        ),
+        (
+            ReferenceTypeId::HierarchicalReferences,
+            ReferenceTypeId::Aggregates,
+        ),
+        (
+            ReferenceTypeId::HierarchicalReferences,
+            ReferenceTypeId::HasProperty,
+        ),
+        (
+            ReferenceTypeId::HierarchicalReferences,
+            ReferenceTypeId::HasComponent,
+        ),
+        (
+            ReferenceTypeId::HierarchicalReferences,
+            ReferenceTypeId::HasOrderedComponent,
+        ),
+        (
+            ReferenceTypeId::HierarchicalReferences,
+            ReferenceTypeId::HasEventSource,
+        ),
+        (
+            ReferenceTypeId::HierarchicalReferences,
+            ReferenceTypeId::HasNotifier,
+        ),
         (ReferenceTypeId::HasChild, ReferenceTypeId::Aggregates),
         (ReferenceTypeId::HasChild, ReferenceTypeId::HasComponent),
-        (ReferenceTypeId::HasChild, ReferenceTypeId::HasHistoricalConfiguration),
+        (
+            ReferenceTypeId::HasChild,
+            ReferenceTypeId::HasHistoricalConfiguration,
+        ),
         (ReferenceTypeId::HasChild, ReferenceTypeId::HasProperty),
-        (ReferenceTypeId::HasChild, ReferenceTypeId::HasOrderedComponent),
+        (
+            ReferenceTypeId::HasChild,
+            ReferenceTypeId::HasOrderedComponent,
+        ),
         (ReferenceTypeId::HasChild, ReferenceTypeId::HasSubtype),
         (ReferenceTypeId::Aggregates, ReferenceTypeId::HasComponent),
-        (ReferenceTypeId::Aggregates, ReferenceTypeId::HasHistoricalConfiguration),
+        (
+            ReferenceTypeId::Aggregates,
+            ReferenceTypeId::HasHistoricalConfiguration,
+        ),
         (ReferenceTypeId::Aggregates, ReferenceTypeId::HasProperty),
-        (ReferenceTypeId::Aggregates, ReferenceTypeId::HasOrderedComponent),
-        (ReferenceTypeId::HasComponent, ReferenceTypeId::HasOrderedComponent),
-        (ReferenceTypeId::HasEventSource, ReferenceTypeId::HasNotifier),
-        (ReferenceTypeId::HierarchicalReferences, ReferenceTypeId::HasNotifier),
-        (ReferenceTypeId::References, ReferenceTypeId::NonHierarchicalReferences),
-        (ReferenceTypeId::NonHierarchicalReferences, ReferenceTypeId::GeneratesEvent),
-        (ReferenceTypeId::NonHierarchicalReferences, ReferenceTypeId::AlwaysGeneratesEvent),
-        (ReferenceTypeId::NonHierarchicalReferences, ReferenceTypeId::HasEncoding),
-        (ReferenceTypeId::NonHierarchicalReferences, ReferenceTypeId::HasModellingRule),
-        (ReferenceTypeId::NonHierarchicalReferences, ReferenceTypeId::HasDescription),
-        (ReferenceTypeId::NonHierarchicalReferences, ReferenceTypeId::HasTypeDefinition),
-        (ReferenceTypeId::GeneratesEvent, ReferenceTypeId::AlwaysGeneratesEvent),
+        (
+            ReferenceTypeId::Aggregates,
+            ReferenceTypeId::HasOrderedComponent,
+        ),
+        (
+            ReferenceTypeId::HasComponent,
+            ReferenceTypeId::HasOrderedComponent,
+        ),
+        (
+            ReferenceTypeId::HasEventSource,
+            ReferenceTypeId::HasNotifier,
+        ),
+        (
+            ReferenceTypeId::HierarchicalReferences,
+            ReferenceTypeId::HasNotifier,
+        ),
+        (
+            ReferenceTypeId::References,
+            ReferenceTypeId::NonHierarchicalReferences,
+        ),
+        (
+            ReferenceTypeId::NonHierarchicalReferences,
+            ReferenceTypeId::GeneratesEvent,
+        ),
+        (
+            ReferenceTypeId::NonHierarchicalReferences,
+            ReferenceTypeId::AlwaysGeneratesEvent,
+        ),
+        (
+            ReferenceTypeId::NonHierarchicalReferences,
+            ReferenceTypeId::HasEncoding,
+        ),
+        (
+            ReferenceTypeId::NonHierarchicalReferences,
+            ReferenceTypeId::HasModellingRule,
+        ),
+        (
+            ReferenceTypeId::NonHierarchicalReferences,
+            ReferenceTypeId::HasDescription,
+        ),
+        (
+            ReferenceTypeId::NonHierarchicalReferences,
+            ReferenceTypeId::HasTypeDefinition,
+        ),
+        (
+            ReferenceTypeId::GeneratesEvent,
+            ReferenceTypeId::AlwaysGeneratesEvent,
+        ),
     ];
 
     // A type should always match itself
-    assert!(references.reference_type_matches(&ReferenceTypeId::NonHierarchicalReferences.into(), &ReferenceTypeId::NonHierarchicalReferences.into(), true));
-    assert!(references.reference_type_matches(&ReferenceTypeId::NonHierarchicalReferences.into(), &ReferenceTypeId::NonHierarchicalReferences.into(), false));
+    assert!(references.reference_type_matches(
+        &ReferenceTypeId::NonHierarchicalReferences.into(),
+        &ReferenceTypeId::NonHierarchicalReferences.into(),
+        true
+    ));
+    assert!(references.reference_type_matches(
+        &ReferenceTypeId::NonHierarchicalReferences.into(),
+        &ReferenceTypeId::NonHierarchicalReferences.into(),
+        false
+    ));
 
     // Make sure that subtypes match when subtypes are to be compared and doesn't when they should
     // not be compared.
@@ -309,7 +446,9 @@ fn find_reference_subtypes() {
 #[test]
 fn array_as_variable() {
     // 1 dimensional array with 100 element
-    let values = (0..100).map(|i| Variant::Int32(i)).collect::<Vec<Variant>>();
+    let values = (0..100)
+        .map(|i| Variant::Int32(i))
+        .collect::<Vec<Variant>>();
 
     // Get the variable node back from the address space, ensure that the ValueRank and ArrayDimensions are correct
     let node_id = NodeId::new(2, 1);
@@ -327,8 +466,10 @@ fn array_as_variable() {
 fn multi_dimension_array_as_variable() {
     // 2 dimensional array with 10x10 elements
 
-    let values = (0..100).map(|i| Variant::Int32(i)).collect::<Vec<Variant>>();
-    let mda = MultiDimensionArray::new(values, vec![10i32, 10i32]);
+    let values = (0..100)
+        .map(|i| Variant::Int32(i))
+        .collect::<Vec<Variant>>();
+    let mda = Array::new_multi(values, vec![10u32, 10u32]);
     assert!(mda.is_valid());
 
     // Get the variable node back from the address space, ensure that the ValueRank and ArrayDimensions are correct
@@ -348,12 +489,20 @@ fn browse_nodes() {
 
     // Test that a node can be found
     let object_id = ObjectId::RootFolder.into();
-    let result = find_node_from_browse_path(&address_space, &object_id, &vec!["Objects".into(), "Sample".into(), "v1".into()]);
+    let result = find_node_from_browse_path(
+        &address_space,
+        &object_id,
+        &vec!["Objects".into(), "Sample".into(), "v1".into()],
+    );
     let node = result.unwrap();
     assert_eq!(node.as_node().browse_name(), QualifiedName::from("v1"));
 
     // Test that a non existent node cannot be found
-    let result = find_node_from_browse_path(&address_space, &object_id, &vec!["Objects".into(), "Sample".into(), "vxxx".into()]);
+    let result = find_node_from_browse_path(
+        &address_space,
+        &object_id,
+        &vec!["Objects".into(), "Sample".into(), "vxxx".into()],
+    );
     assert!(result.is_err());
     assert_eq!(result.unwrap_err(), StatusCode::BadNotFound);
 }
@@ -377,12 +526,20 @@ fn object_builder() {
     // Verify the variable is there
     let _o = match address_space.find_node(&node_id).unwrap() {
         NodeType::Object(o) => o,
-        _ => panic!()
+        _ => panic!(),
     };
 
     // Verify the reference to the objects folder is there
-    assert!(address_space.has_reference(&ObjectId::ObjectsFolder.into(), &node_id, ReferenceTypeId::Organizes));
-    assert!(address_space.has_reference(&node_id, &node_type_id, ReferenceTypeId::HasTypeDefinition));
+    assert!(address_space.has_reference(
+        &ObjectId::ObjectsFolder.into(),
+        &node_id,
+        ReferenceTypeId::Organizes
+    ));
+    assert!(address_space.has_reference(
+        &node_id,
+        &node_type_id,
+        ReferenceTypeId::HasTypeDefinition
+    ));
 }
 
 #[test]
@@ -396,28 +553,33 @@ fn object_type_builder() {
 
     let _ot = match address_space.find_node(&node_type_id).unwrap() {
         NodeType::ObjectType(ot) => ot,
-        _ => panic!()
+        _ => panic!(),
     };
 
-    assert!(address_space.has_reference(&ObjectTypeId::BaseObjectType.into(), &node_type_id, ReferenceTypeId::HasSubtype));
+    assert!(address_space.has_reference(
+        &ObjectTypeId::BaseObjectType.into(),
+        &node_type_id,
+        ReferenceTypeId::HasSubtype
+    ));
 }
 
 #[test]
 fn variable_builder() {
     let result = std::panic::catch_unwind(|| {
         // This should panic
-        let _v = VariableBuilder::new(&NodeId::null(), "", "")
-            .build();
+        let _v = VariableBuilder::new(&NodeId::null(), "", "").build();
     });
     assert!(result.is_err());
 
     // This should build
     let _v = VariableBuilder::new(&NodeId::new(1, 1), "", "")
+        .data_type(DataTypeId::Boolean)
         .build();
 
     // Check a variable with a bunch of fields set
     let v = VariableBuilder::new(&NodeId::new(1, "Hello"), "BrowseName", "DisplayName")
         .description("Desc")
+        .data_type(DataTypeId::UInt32)
         .value_rank(10)
         .array_dimensions(&[1, 2, 3])
         .historizing(true)
@@ -428,11 +590,22 @@ fn variable_builder() {
     assert_eq!(v.node_id(), NodeId::new(1, "Hello"));
     assert_eq!(v.browse_name(), QualifiedName::new(0, "BrowseName"));
     assert_eq!(v.display_name(), LocalizedText::new("", "DisplayName"));
+    assert_eq!(v.data_type(), DataTypeId::UInt32.into());
     assert_eq!(v.description().unwrap(), LocalizedText::new("", "Desc"));
     assert_eq!(v.value_rank(), 10);
     assert_eq!(v.array_dimensions().unwrap(), vec![1, 2, 3]);
     assert_eq!(v.historizing(), true);
-    assert_eq!(v.value(NumericRange::None, &QualifiedName::null()).value.unwrap(), Variant::from(999));
+    assert_eq!(
+        v.value(
+            TimestampsToReturn::Neither,
+            NumericRange::None,
+            &QualifiedName::null(),
+            0.0
+        )
+        .value
+        .unwrap(),
+        Variant::from(999)
+    );
     assert_eq!(v.minimum_sampling_interval().unwrap(), 123.0);
 
     // Add a variable to the address space
@@ -442,6 +615,7 @@ fn variable_builder() {
     let _v = VariableBuilder::new(&node_id, "BrowseName", "DisplayName")
         .description("Desc")
         .value_rank(10)
+        .data_type(DataTypeId::UInt32)
         .array_dimensions(&[1, 2, 3])
         .historizing(true)
         .value(Variant::from(999))
@@ -452,44 +626,61 @@ fn variable_builder() {
     // Verify the variable is there
     assert!(address_space.find_variable_by_ref(&node_id).is_some());
     // Verify the reference to the objects folder is there
-    assert!(address_space.has_reference(&ObjectId::ObjectsFolder.into(), &node_id, ReferenceTypeId::Organizes));
+    assert!(address_space.has_reference(
+        &ObjectId::ObjectsFolder.into(),
+        &node_id,
+        ReferenceTypeId::Organizes
+    ));
 }
 
 #[test]
 fn method_builder() {
     let mut address_space = AddressSpace::new();
 
+    let ns = address_space.register_namespace("urn:test").unwrap();
+
     let object_id: NodeId = ObjectId::ObjectsFolder.into();
 
-    let fn_node_id = NodeId::new(2, "HelloWorld");
+    let fn_node_id = NodeId::new(ns, "HelloWorld");
 
     let inserted = MethodBuilder::new(&fn_node_id, "HelloWorld", "HelloWorld")
         .component_of(object_id.clone())
-        .output_args(&mut address_space, &[
-            ("Result", DataTypeId::String).into()
-        ])
+        .output_args(&mut address_space, &[("Result", DataTypeId::String).into()])
         .callback(Box::new(HelloWorld))
         .insert(&mut address_space);
     assert!(inserted);
 
     let method = match address_space.find_node(&fn_node_id).unwrap() {
         NodeType::Method(m) => m,
-        _ => panic!()
+        _ => panic!(),
     };
 
     assert!(method.has_callback());
 
-    let refs = address_space.find_references(&fn_node_id, Some((ReferenceTypeId::HasProperty, false))).unwrap();
+    let refs = address_space
+        .find_references(&fn_node_id, Some((ReferenceTypeId::HasProperty, false)))
+        .unwrap();
     assert_eq!(refs.len(), 1);
 
-    let child = address_space.find_node(&refs.get(0).unwrap().target_node).unwrap();
+    let child = address_space
+        .find_node(&refs.get(0).unwrap().target_node)
+        .unwrap();
     if let NodeType::Variable(v) = child {
         // verify OutputArguments
         // verify OutputArguments / Argument value
         assert_eq!(v.data_type(), DataTypeId::Argument.into());
         assert_eq!(v.display_name(), LocalizedText::from("OutputArguments"));
-        let v = v.value(NumericRange::None, &QualifiedName::null()).value.unwrap();
-        if let Variant::Array(v) = v {
+        let v = v
+            .value(
+                TimestampsToReturn::Neither,
+                NumericRange::None,
+                &QualifiedName::null(),
+                0.0,
+            )
+            .value
+            .unwrap();
+        if let Variant::Array(array) = v {
+            let v = array.values;
             assert_eq!(v.len(), 1);
             let v = v.get(0).unwrap().clone();
             if let Variant::ExtensionObject(v) = v {
@@ -515,7 +706,11 @@ fn method_builder() {
 struct HelloWorld;
 
 impl callbacks::Method for HelloWorld {
-    fn call(&mut self, _session: &mut Session, _request: &CallMethodRequest) -> Result<CallMethodResult, StatusCode> {
+    fn call(
+        &mut self,
+        _session: &mut Session,
+        _request: &CallMethodRequest,
+    ) -> Result<CallMethodResult, StatusCode> {
         Ok(CallMethodResult {
             status_code: StatusCode::Good,
             input_argument_results: Some(vec![StatusCode::Good]),
@@ -557,7 +752,9 @@ fn simple_delete_node() {
     assert!(address_space.find_node(&node_id).is_none());
     assert!(address_space.find_node(&root_node).is_some());
     assert!(!address_space.has_reference(&root_node, &node_id, ReferenceTypeId::Organizes));
-    assert!(!address_space.references().reference_to_node_exists(&node_id));
+    assert!(!address_space
+        .references()
+        .reference_to_node_exists(&node_id));
 }
 
 #[test]
@@ -582,9 +779,21 @@ fn delete_node() {
 
         // Verify the object and refs are there
         assert!(address_space.find_node(&node_id).is_some());
-        assert!(address_space.has_reference(&ObjectId::ObjectsFolder.into(), &node_id, ReferenceTypeId::Organizes));
-        assert!(!address_space.has_reference(&node_id, &ObjectId::ObjectsFolder.into(), ReferenceTypeId::Organizes));
-        assert!(address_space.has_reference(&node_id, &node_type_id, ReferenceTypeId::HasTypeDefinition));
+        assert!(address_space.has_reference(
+            &ObjectId::ObjectsFolder.into(),
+            &node_id,
+            ReferenceTypeId::Organizes
+        ));
+        assert!(!address_space.has_reference(
+            &node_id,
+            &ObjectId::ObjectsFolder.into(),
+            ReferenceTypeId::Organizes
+        ));
+        assert!(address_space.has_reference(
+            &node_id,
+            &node_type_id,
+            ReferenceTypeId::HasTypeDefinition
+        ));
 
         // Try one time deleting references, the other time not deleting them.
         let delete_references = i == 1;
@@ -592,14 +801,32 @@ fn delete_node() {
         if !delete_references {
             // Deleted the node but not refs
             assert!(address_space.find_node(&node_id).is_none());
-            assert!(address_space.has_reference(&ObjectId::ObjectsFolder.into(), &node_id, ReferenceTypeId::Organizes));
-            assert!(address_space.has_reference(&node_id, &node_type_id, ReferenceTypeId::HasTypeDefinition));
+            assert!(address_space.has_reference(
+                &ObjectId::ObjectsFolder.into(),
+                &node_id,
+                ReferenceTypeId::Organizes
+            ));
+            assert!(address_space.has_reference(
+                &node_id,
+                &node_type_id,
+                ReferenceTypeId::HasTypeDefinition
+            ));
         } else {
             // Delete the node and the refs
             assert!(address_space.find_node(&node_id).is_none());
-            assert!(!address_space.has_reference(&ObjectId::ObjectsFolder.into(), &node_id, ReferenceTypeId::Organizes));
-            assert!(!address_space.has_reference(&node_id, &node_type_id, ReferenceTypeId::HasTypeDefinition));
-            assert!(!address_space.references().reference_to_node_exists(&node_id));
+            assert!(!address_space.has_reference(
+                &ObjectId::ObjectsFolder.into(),
+                &node_id,
+                ReferenceTypeId::Organizes
+            ));
+            assert!(!address_space.has_reference(
+                &node_id,
+                &node_type_id,
+                ReferenceTypeId::HasTypeDefinition
+            ));
+            assert!(!address_space
+                .references()
+                .reference_to_node_exists(&node_id));
         }
     });
 }
@@ -610,21 +837,56 @@ fn is_subtype() {
     // Test subtypes against other and the expected result
     let subtypes = [
         // Positive
-        (ObjectTypeId::BaseEventType, ObjectTypeId::BaseEventType, true),
-        (ObjectTypeId::AuditEventType, ObjectTypeId::BaseEventType, true),
-        (ObjectTypeId::BaseModelChangeEventType, ObjectTypeId::BaseEventType, true),
-        (ObjectTypeId::AuditHistoryUpdateEventType, ObjectTypeId::BaseEventType, true),
-        (ObjectTypeId::AuditUrlMismatchEventType, ObjectTypeId::AuditSessionEventType, true),
+        (
+            ObjectTypeId::BaseEventType,
+            ObjectTypeId::BaseEventType,
+            true,
+        ),
+        (
+            ObjectTypeId::AuditEventType,
+            ObjectTypeId::BaseEventType,
+            true,
+        ),
+        (
+            ObjectTypeId::BaseModelChangeEventType,
+            ObjectTypeId::BaseEventType,
+            true,
+        ),
+        (
+            ObjectTypeId::AuditHistoryUpdateEventType,
+            ObjectTypeId::BaseEventType,
+            true,
+        ),
+        (
+            ObjectTypeId::AuditUrlMismatchEventType,
+            ObjectTypeId::AuditSessionEventType,
+            true,
+        ),
         // Negative
         //   BaseEventType is not a subtype of AuditEventType
-        (ObjectTypeId::BaseEventType, ObjectTypeId::AuditEventType, false),
+        (
+            ObjectTypeId::BaseEventType,
+            ObjectTypeId::AuditEventType,
+            false,
+        ),
         //   DeviceFailureEventType is not a subtype of ProgressEventType (different branches)
-        (ObjectTypeId::DeviceFailureEventType, ObjectTypeId::ProgressEventType, false),
+        (
+            ObjectTypeId::DeviceFailureEventType,
+            ObjectTypeId::ProgressEventType,
+            false,
+        ),
         //   SystemEventType is not a subtype of ProgressEventType (peers)
-        (ObjectTypeId::SystemEventType, ObjectTypeId::ProgressEventType, false),
+        (
+            ObjectTypeId::SystemEventType,
+            ObjectTypeId::ProgressEventType,
+            false,
+        ),
     ];
     subtypes.iter().for_each(|v| {
-        println!("Expecting {:?} to be a subtype of {:?} == {:?}", v.0, v.1, v.2);
+        println!(
+            "Expecting {:?} to be a subtype of {:?} == {:?}",
+            v.0, v.1, v.2
+        );
         assert_eq!(address_space.is_subtype(&v.0.into(), &v.1.into()), v.2);
     });
 }
@@ -634,7 +896,9 @@ fn hierarchical_references() {
     let address_space = AddressSpace::new();
 
     // Try with root
-    let refs = address_space.find_hierarchical_references(&NodeId::root_folder_id()).unwrap();
+    let refs = address_space
+        .find_hierarchical_references(&NodeId::root_folder_id())
+        .unwrap();
     assert_eq!(refs.len(), 3);
     assert!(refs.contains(&NodeId::objects_folder_id()));
     assert!(refs.contains(&NodeId::views_folder_id()));
@@ -648,9 +912,13 @@ fn hierarchical_references() {
     assert!(refs.contains(&VariableId::Server_ServerCapabilities_ServerProfileArray.into()));
     assert!(refs.contains(&VariableId::Server_ServerCapabilities_LocaleIdArray.into()));
     assert!(refs.contains(&VariableId::Server_ServerCapabilities_MinSupportedSampleRate.into()));
-    assert!(refs.contains(&VariableId::Server_ServerCapabilities_MaxBrowseContinuationPoints.into()));
+    assert!(
+        refs.contains(&VariableId::Server_ServerCapabilities_MaxBrowseContinuationPoints.into())
+    );
     assert!(refs.contains(&VariableId::Server_ServerCapabilities_MaxQueryContinuationPoints.into()));
-    assert!(refs.contains(&VariableId::Server_ServerCapabilities_MaxHistoryContinuationPoints.into()));
+    assert!(
+        refs.contains(&VariableId::Server_ServerCapabilities_MaxHistoryContinuationPoints.into())
+    );
     assert!(refs.contains(&VariableId::Server_ServerCapabilities_SoftwareCertificates.into()));
     assert!(refs.contains(&VariableId::Server_ServerCapabilities_MaxArrayLength.into()));
     assert!(refs.contains(&VariableId::Server_ServerCapabilities_MaxStringLength.into()));

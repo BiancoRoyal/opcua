@@ -1,3 +1,7 @@
+// OPCUA for Rust
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (C) 2017-2020 Adam Lock
+
 //! Provides debug metric of server state that can be used by anything that wants
 //! to see what is happening in the server. State is updated by the server as sessions are added, removed,
 //! and when subscriptions / monitored items are added, removed.
@@ -68,12 +72,15 @@ impl ServerMetrics {
         };
         // For security, blank out user tokens
         config.user_tokens.clear();
-        config.user_tokens.insert(String::new(), config::ServerUserToken {
-            user: String::from("User identity tokens have been removed"),
-            pass: None,
-            x509: None,
-            thumbprint: None,
-        });
+        config.user_tokens.insert(
+            String::new(),
+            config::ServerUserToken {
+                user: String::from("User identity tokens have been removed"),
+                pass: None,
+                x509: None,
+                thumbprint: None,
+            },
+        );
         self.config = Some(config.clone());
     }
 
@@ -90,54 +97,74 @@ impl ServerMetrics {
             self.diagnostics = diagnostics.clone();
         }
 
-        let elapsed = now.as_chrono().signed_duration_since(start_time.as_chrono());
+        let elapsed = now
+            .as_chrono()
+            .signed_duration_since(start_time.as_chrono());
         self.server.uptime_ms = elapsed.num_milliseconds();
     }
 
     // Update the connection metrics which includes susbcriptions and monitored items
     pub fn update_from_connections(&mut self, connections: server::Connections) {
         self.runtime_components = runtime_components!();
-        self.connections = connections.iter().map(|c| {
-            // Carefully extract info while minimizing chance of deadlock
-            let (client_address, transport_state, session) = {
-                let connection = trace_read_lock_unwrap!(c);
-                let client_address = if let Some(ref client_address) = connection.client_address() {
-                    format!("{:?}", client_address)
-                } else {
-                    String::new()
+        self.connections = connections
+            .iter()
+            .map(|c| {
+                // Carefully extract info while minimizing chance of deadlock
+                let (client_address, transport_state, session) = {
+                    let connection = trace_read_lock_unwrap!(c);
+                    let client_address =
+                        if let Some(ref client_address) = connection.client_address() {
+                            format!("{:?}", client_address)
+                        } else {
+                            String::new()
+                        };
+                    let transport_state = match connection.state() {
+                        TransportState::New => "New".to_string(),
+                        TransportState::WaitingHello => "WaitingHello".to_string(),
+                        TransportState::ProcessMessages => "ProcessMessages".to_string(),
+                        TransportState::Finished(status_code) => {
+                            format!("Finished({})", status_code)
+                        }
+                    };
+                    (client_address, transport_state, connection.session())
                 };
-                let transport_state = match connection.state() {
-                    TransportState::New => "New".to_string(),
-                    TransportState::WaitingHello => "WaitingHello".to_string(),
-                    TransportState::ProcessMessages => "ProcessMessages".to_string(),
-                    TransportState::Finished(status_code) => format!("Finished({})", status_code)
+                let (
+                    id,
+                    session_activated,
+                    session_terminated,
+                    session_terminated_at,
+                    subscriptions,
+                ) = {
+                    let session = trace_read_lock_unwrap!(session);
+                    let id = session.session_id().to_string();
+                    let session_activated = session.is_activated();
+                    let session_terminated = session.is_terminated();
+                    let session_terminated_at = if session.is_terminated() {
+                        session.terminated_at().to_rfc3339()
+                    } else {
+                        String::new()
+                    };
+                    let subscriptions = session.subscriptions().metrics();
+                    (
+                        id,
+                        session_activated,
+                        session_terminated,
+                        session_terminated_at,
+                        subscriptions,
+                    )
                 };
-                (client_address, transport_state, connection.session())
-            };
-            let (id, session_activated, session_terminated, session_terminated_at, subscriptions) = {
-                let session = trace_read_lock_unwrap!(session);
-                let id = session.session_id.to_string();
-                let session_activated = session.activated;
-                let session_terminated = session.terminated();
-                let session_terminated_at = if session.terminated() {
-                    session.terminated_at().to_rfc3339()
-                } else {
-                    String::new()
-                };
-                let subscriptions = session.subscriptions.metrics();
-                (id, session_activated, session_terminated, session_terminated_at, subscriptions)
-            };
 
-            // session.subscriptions.iterate ...
-            Connection {
-                id,
-                client_address,
-                transport_state,
-                session_activated,
-                session_terminated,
-                session_terminated_at,
-                subscriptions,
-            }
-        }).collect();
+                // session.subscriptions.iterate ...
+                Connection {
+                    id,
+                    client_address,
+                    transport_state,
+                    session_activated,
+                    session_terminated,
+                    session_terminated_at,
+                    subscriptions,
+                }
+            })
+            .collect();
     }
 }

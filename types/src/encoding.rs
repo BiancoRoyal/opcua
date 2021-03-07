@@ -1,24 +1,26 @@
+// OPCUA for Rust
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (C) 2017-2020 Adam Lock
+
 //! Contains the `BinaryEncoder` trait and helpers for reading and writing of scalar values and
 //! other primitives.
 
-use byteorder::{ByteOrder, LittleEndian};
 use std::{
     self,
     fmt::Debug,
     io::{Cursor, Read, Result, Write},
 };
 
-use crate::{
-    constants,
-    status_codes::StatusCode
-};
+use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
+
+use crate::{constants, status_codes::StatusCode};
 
 pub type EncodingResult<T> = std::result::Result<T, StatusCode>;
 
 #[derive(Clone, Copy, Debug)]
 pub struct DecodingLimits {
     /// Maximum size of a message chunk in bytes. 0 means no limit
-    pub max_chunk_size: usize,
+    pub max_chunk_count: usize,
     /// Maximum length in bytes (not chars!) of a string. 0 actually means 0, i.e. no string permitted
     pub max_string_length: usize,
     /// Maximum length in bytes of a byte string. 0 actually means 0, i.e. no byte string permitted
@@ -30,7 +32,7 @@ pub struct DecodingLimits {
 impl Default for DecodingLimits {
     fn default() -> Self {
         DecodingLimits {
-            max_chunk_size: 0,
+            max_chunk_count: 0,
             max_string_length: constants::MAX_STRING_LENGTH,
             max_byte_string_length: constants::MAX_BYTE_STRING_LENGTH,
             max_array_length: constants::MAX_ARRAY_LENGTH,
@@ -43,7 +45,7 @@ impl DecodingLimits {
     /// any string or array.
     pub fn minimal() -> Self {
         DecodingLimits {
-            max_chunk_size: 0,
+            max_chunk_count: 0,
             max_string_length: 0,
             max_byte_string_length: 0,
             max_array_length: 0,
@@ -83,7 +85,10 @@ pub fn process_encode_io_result(result: Result<usize>) -> EncodingResult<usize> 
 }
 
 /// Converts an IO encoding error (and logs when in error) into an EncodingResult
-pub fn process_decode_io_result<T>(result: Result<T>) -> EncodingResult<T> where T: Debug {
+pub fn process_decode_io_result<T>(result: Result<T>) -> EncodingResult<T>
+where
+    T: Debug,
+{
     result.map_err(|err| {
         trace!("Decoding error - {:?}", err);
         StatusCode::BadDecodingError
@@ -100,7 +105,10 @@ pub fn byte_len_array<T: BinaryEncoder<T>>(values: &Option<Vec<T>>) -> usize {
 }
 
 /// Write an array of the encoded type to stream, preserving distinction between null array and empty array
-pub fn write_array<S: Write, T: BinaryEncoder<T>>(stream: &mut S, values: &Option<Vec<T>>) -> EncodingResult<usize> {
+pub fn write_array<S: Write, T: BinaryEncoder<T>>(
+    stream: &mut S,
+    values: &Option<Vec<T>>,
+) -> EncodingResult<usize> {
     let mut size = 0;
     if let Some(ref values) = values {
         size += write_i32(stream, values.len() as i32)?;
@@ -114,7 +122,10 @@ pub fn write_array<S: Write, T: BinaryEncoder<T>>(stream: &mut S, values: &Optio
 }
 
 /// Reads an array of the encoded type from a stream, preserving distinction between null array and empty array
-pub fn read_array<S: Read, T: BinaryEncoder<T>>(stream: &mut S, decoding_limits: &DecodingLimits) -> EncodingResult<Option<Vec<T>>> {
+pub fn read_array<S: Read, T: BinaryEncoder<T>>(
+    stream: &mut S,
+    decoding_limits: &DecodingLimits,
+) -> EncodingResult<Option<Vec<T>>> {
     let len = read_i32(stream)?;
     if len == -1 {
         Ok(None)
@@ -122,7 +133,10 @@ pub fn read_array<S: Read, T: BinaryEncoder<T>>(stream: &mut S, decoding_limits:
         error!("Array length is negative value and invalid");
         Err(StatusCode::BadDecodingError)
     } else if len as usize > decoding_limits.max_array_length {
-        error!("Array length {} exceeds decoding limit {}", len, decoding_limits.max_array_length);
+        error!(
+            "Array length {} exceeds decoding limit {}",
+            len, decoding_limits.max_array_length
+        );
         Err(StatusCode::BadDecodingError)
     } else {
         let mut values: Vec<T> = Vec::with_capacity(len as usize);
@@ -133,63 +147,100 @@ pub fn read_array<S: Read, T: BinaryEncoder<T>>(stream: &mut S, decoding_limits:
     }
 }
 
+/// Writes a series of identical bytes to the stream
+pub fn write_bytes(stream: &mut dyn Write, value: u8, count: usize) -> EncodingResult<usize> {
+    for _ in 0..count {
+        let _ = stream
+            .write_u8(value)
+            .map_err(|_| StatusCode::BadEncodingError)?;
+    }
+    Ok(count)
+}
+
 /// Writes an unsigned byte to the stream
-pub fn write_u8<T>(stream: &mut dyn Write, value: T) -> EncodingResult<usize> where T: Into<u8> {
+pub fn write_u8<T>(stream: &mut dyn Write, value: T) -> EncodingResult<usize>
+where
+    T: Into<u8>,
+{
     let buf: [u8; 1] = [value.into()];
     process_encode_io_result(stream.write(&buf))
 }
 
 /// Writes a signed 16-bit value to the stream
-pub fn write_i16<T>(stream: &mut dyn Write, value: T) -> EncodingResult<usize> where T: Into<i16> {
+pub fn write_i16<T>(stream: &mut dyn Write, value: T) -> EncodingResult<usize>
+where
+    T: Into<i16>,
+{
     let mut buf = [0u8; 2];
     LittleEndian::write_i16(&mut buf, value.into());
     process_encode_io_result(stream.write(&buf))
 }
 
 /// Writes an unsigned 16-bit value to the stream
-pub fn write_u16<T>(stream: &mut dyn Write, value: T) -> EncodingResult<usize> where T: Into<u16> {
+pub fn write_u16<T>(stream: &mut dyn Write, value: T) -> EncodingResult<usize>
+where
+    T: Into<u16>,
+{
     let mut buf = [0u8; 2];
     LittleEndian::write_u16(&mut buf, value.into());
     process_encode_io_result(stream.write(&buf))
 }
 
 /// Writes a signed 32-bit value to the stream
-pub fn write_i32<T>(stream: &mut dyn Write, value: T) -> EncodingResult<usize> where T: Into<i32> {
+pub fn write_i32<T>(stream: &mut dyn Write, value: T) -> EncodingResult<usize>
+where
+    T: Into<i32>,
+{
     let mut buf = [0u8; 4];
     LittleEndian::write_i32(&mut buf, value.into());
     process_encode_io_result(stream.write(&buf))
 }
 
 /// Writes an unsigned 32-bit value to the stream
-pub fn write_u32<T>(stream: &mut dyn Write, value: T) -> EncodingResult<usize> where T: Into<u32> {
+pub fn write_u32<T>(stream: &mut dyn Write, value: T) -> EncodingResult<usize>
+where
+    T: Into<u32>,
+{
     let mut buf = [0u8; 4];
     LittleEndian::write_u32(&mut buf, value.into());
     process_encode_io_result(stream.write(&buf))
 }
 
 /// Writes a signed 64-bit value to the stream
-pub fn write_i64<T>(stream: &mut dyn Write, value: T) -> EncodingResult<usize> where T: Into<i64> {
+pub fn write_i64<T>(stream: &mut dyn Write, value: T) -> EncodingResult<usize>
+where
+    T: Into<i64>,
+{
     let mut buf = [0u8; 8];
     LittleEndian::write_i64(&mut buf, value.into());
     process_encode_io_result(stream.write(&buf))
 }
 
 /// Writes an unsigned 64-bit value to the stream
-pub fn write_u64<T>(stream: &mut dyn Write, value: T) -> EncodingResult<usize> where T: Into<u64> {
+pub fn write_u64<T>(stream: &mut dyn Write, value: T) -> EncodingResult<usize>
+where
+    T: Into<u64>,
+{
     let mut buf = [0u8; 8];
     LittleEndian::write_u64(&mut buf, value.into());
     process_encode_io_result(stream.write(&buf))
 }
 
 /// Writes a 32-bit precision value to the stream
-pub fn write_f32<T>(stream: &mut dyn Write, value: T) -> EncodingResult<usize> where T: Into<f32> {
+pub fn write_f32<T>(stream: &mut dyn Write, value: T) -> EncodingResult<usize>
+where
+    T: Into<f32>,
+{
     let mut buf = [0u8; 4];
     LittleEndian::write_f32(&mut buf, value.into());
     process_encode_io_result(stream.write(&buf))
 }
 
 /// Writes a 64-bit precision value to the stream
-pub fn write_f64<T>(stream: &mut dyn Write, value: T) -> EncodingResult<usize> where T: Into<f64> {
+pub fn write_f64<T>(stream: &mut dyn Write, value: T) -> EncodingResult<usize>
+where
+    T: Into<f64>,
+{
     let mut buf = [0u8; 8];
     LittleEndian::write_f64(&mut buf, value.into());
     process_encode_io_result(stream.write(&buf))

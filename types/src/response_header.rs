@@ -1,13 +1,15 @@
-use std::{self, io::{Read, Write}};
+// OPCUA for Rust
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (C) 2017-2020 Adam Lock
+
+use std::{
+    self,
+    io::{Read, Write},
+};
 
 use crate::{
-    data_types::*,
-    date_time::DateTime,
-    diagnostic_info::DiagnosticInfo,
-    encoding::*,
-    extension_object::ExtensionObject,
-    request_header::RequestHeader,
-    status_codes::StatusCode,
+    data_types::*, date_time::DateTime, diagnostic_info::DiagnosticInfo, encoding::*,
+    extension_object::ExtensionObject, request_header::RequestHeader, status_codes::StatusCode,
     string::UAString,
 };
 
@@ -69,11 +71,22 @@ impl ResponseHeader {
         ResponseHeader::new_service_result(request_header, StatusCode::Good)
     }
 
-    pub fn new_service_result(request_header: &RequestHeader, service_result: StatusCode) -> ResponseHeader {
-        ResponseHeader::new_timestamped_service_result(DateTime::now(), request_header, service_result)
+    pub fn new_service_result(
+        request_header: &RequestHeader,
+        service_result: StatusCode,
+    ) -> ResponseHeader {
+        ResponseHeader::new_timestamped_service_result(
+            DateTime::now(),
+            request_header,
+            service_result,
+        )
     }
 
-    pub fn new_timestamped_service_result(timestamp: DateTime, request_header: &RequestHeader, service_result: StatusCode) -> ResponseHeader {
+    pub fn new_timestamped_service_result(
+        timestamp: DateTime,
+        request_header: &RequestHeader,
+        service_result: StatusCode,
+    ) -> ResponseHeader {
         ResponseHeader {
             timestamp,
             request_handle: request_header.request_handle,

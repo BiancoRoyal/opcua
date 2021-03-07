@@ -1,16 +1,20 @@
+// OPCUA for Rust
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (C) 2017-2020 Adam Lock
+
 //! Contains all code related to sending / receiving messages from a transport
 //! and turning those messages into and out of chunks.
 
 pub mod chunker;
 pub mod message_chunk;
 pub mod message_chunk_info;
+pub mod message_writer;
 pub mod secure_channel;
 pub mod security_header;
-pub mod message_writer;
 pub mod tcp_codec;
-pub mod wrapped_tcp_stream;
 pub mod tcp_types;
 pub mod url;
+pub mod wrapped_tcp_stream;
 
 pub mod prelude {
     pub use super::chunker::*;

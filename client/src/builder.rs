@@ -1,3 +1,7 @@
+// OPCUA for Rust
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (C) 2017-2020 Adam Lock
+
 use std::path::PathBuf;
 
 use opcua_core::config::Config;
@@ -28,7 +32,7 @@ use crate::{client::*, config::*};
 ///         .default_endpoint("sample_endpoint")
 ///         .create_sample_keypair(true)
 ///         .trust_server_certs(true)
-///         .user_token("sample_user", ClientUserToken::user_pass("sample", "sample1"));
+///         .user_token("sample_user", ClientUserToken::user_pass("sample1", "sample1pwd"));
 ///     let client = builder.client().unwrap();
 /// }
 /// ```
@@ -43,7 +47,7 @@ pub struct ClientBuilder {
 impl Default for ClientBuilder {
     fn default() -> Self {
         ClientBuilder {
-            config: ClientConfig::default()
+            config: ClientConfig::default(),
         }
     }
 }
@@ -55,9 +59,12 @@ impl ClientBuilder {
     }
 
     /// Creates a `ClientBuilder` using a configuration file as the initial state.
-    pub fn from_config<T>(path: T) -> Result<ClientBuilder, ()> where T: Into<PathBuf> {
+    pub fn from_config<T>(path: T) -> Result<ClientBuilder, ()>
+    where
+        T: Into<PathBuf>,
+    {
         Ok(ClientBuilder {
-            config: ClientConfig::load(&path.into())?
+            config: ClientConfig::load(&path.into())?,
         })
     }
 
@@ -86,19 +93,28 @@ impl ClientBuilder {
     }
 
     /// Sets the application name.
-    pub fn application_name<T>(mut self, application_name: T) -> Self where T: Into<String> {
+    pub fn application_name<T>(mut self, application_name: T) -> Self
+    where
+        T: Into<String>,
+    {
         self.config.application_name = application_name.into();
         self
     }
 
     /// Sets the application uri
-    pub fn application_uri<T>(mut self, application_uri: T) -> Self where T: Into<String> {
+    pub fn application_uri<T>(mut self, application_uri: T) -> Self
+    where
+        T: Into<String>,
+    {
         self.config.application_uri = application_uri.into();
         self
     }
 
     /// Sets the product uri.
-    pub fn product_uri<T>(mut self, product_uri: T) -> Self where T: Into<String> {
+    pub fn product_uri<T>(mut self, product_uri: T) -> Self
+    where
+        T: Into<String>,
+    {
         self.config.product_uri = product_uri.into();
         self
     }
@@ -107,6 +123,28 @@ impl ClientBuilder {
     /// directory.
     pub fn create_sample_keypair(mut self, create_sample_keypair: bool) -> Self {
         self.config.create_sample_keypair = create_sample_keypair;
+        self
+    }
+
+    /// Sets a custom client certificate path. The path is required to be provided as a partial
+    /// path relative to the PKI directory. If set, this path will be used to read the client
+    /// certificate from disk. The certificate can be in either the .der or .pem format.
+    pub fn certificate_path<T>(mut self, certificate_path: T) -> Self
+    where
+        T: Into<PathBuf>,
+    {
+        self.config.certificate_path = Some(certificate_path.into());
+        self
+    }
+
+    /// Sets a custom private key path. The path is required to be provided as a partial path
+    /// relative to the PKI directory. If set, this path will be used to read the private key
+    /// from disk.
+    pub fn private_key_path<T>(mut self, private_key_path: T) -> Self
+    where
+        T: Into<PathBuf>,
+    {
+        self.config.private_key_path = Some(private_key_path.into());
         self
     }
 
@@ -119,9 +157,21 @@ impl ClientBuilder {
         self
     }
 
+    /// Sets whether the client should verify server certificates. Regardless of this setting,
+    /// server certificates are always checked to see if they are trusted and have a valid key
+    /// length. In addition (if `verify_server_certs` is unset or is set to `true`) it will
+    /// verify the hostname, application uri and the not before / after values to ensure validity.
+    pub fn verify_server_certs(mut self, verify_server_certs: bool) -> Self {
+        self.config.verify_server_certs = verify_server_certs;
+        self
+    }
+
     /// Sets the pki directory where client's own key pair is stored and where `/trusted` and
     /// `/rejected` server certificates are stored.
-    pub fn pki_dir<T>(mut self, pki_dir: T) -> Self where T: Into<PathBuf> {
+    pub fn pki_dir<T>(mut self, pki_dir: T) -> Self
+    where
+        T: Into<PathBuf>,
+    {
         self.config.pki_dir = pki_dir.into();
         self
     }
@@ -134,27 +184,39 @@ impl ClientBuilder {
     }
 
     /// Sets the id of the default endpoint to connect to.
-    pub fn default_endpoint<T>(mut self, endpoint_id: T) -> Self where T: Into<String> {
+    pub fn default_endpoint<T>(mut self, endpoint_id: T) -> Self
+    where
+        T: Into<String>,
+    {
         self.config.default_endpoint = endpoint_id.into();
         self
     }
 
     /// Adds an endpoint to the list of endpoints the client knows of.
-    pub fn endpoint<T>(mut self, endpoint_id: T, endpoint: ClientEndpoint) -> Self where T: Into<String> {
+    pub fn endpoint<T>(mut self, endpoint_id: T, endpoint: ClientEndpoint) -> Self
+    where
+        T: Into<String>,
+    {
         self.config.endpoints.insert(endpoint_id.into(), endpoint);
         self
     }
 
     /// Adds multiple endpoints to the list of endpoints the client knows of.
-    pub fn endpoints<T>(mut self, endpoints: Vec<(T, ClientEndpoint)>) -> Self where T: Into<String> {
+    pub fn endpoints<T>(mut self, endpoints: Vec<(T, ClientEndpoint)>) -> Self
+    where
+        T: Into<String>,
+    {
         for e in endpoints {
             self.config.endpoints.insert(e.0.into(), e.1);
-        };
+        }
         self
     }
 
     /// Adds a user token to the list supported by the client.
-    pub fn user_token<T>(mut self, user_token_id: T, user_token: ClientUserToken) -> Self where T: Into<String> {
+    pub fn user_token<T>(mut self, user_token_id: T, user_token: ClientUserToken) -> Self
+    where
+        T: Into<String>,
+    {
         let user_token_id = user_token_id.into();
         if user_token_id == ANONYMOUS_USER_TOKEN_ID {
             panic!("User token id {} is reserved", user_token_id);
@@ -183,6 +245,13 @@ impl ClientBuilder {
         self.config.session_timeout = session_timeout;
         self
     }
+
+    /// Configures the client to use a single-threaded executor. The default executor uses a
+    /// thread pool with a worker thread for each CPU core available on the system.
+    pub fn single_threaded_executor(mut self) -> Self {
+        self.config.single_threaded_executor = true;
+        self
+    }
 }
 
 #[test]
@@ -193,15 +262,19 @@ fn client_builder() {
     let b = ClientBuilder::new()
         .application_name("appname")
         .application_uri("http://appname")
-        .trust_server_certs(true)
-        .create_sample_keypair(true)
         .product_uri("http://product")
+        .create_sample_keypair(true)
+        .certificate_path("certxyz")
+        .private_key_path("keyxyz")
+        .trust_server_certs(true)
+        .verify_server_certs(false)
         .pki_dir("pkixyz")
         .preferred_locales(vec!["a".to_string(), "b".to_string(), "c".to_string()])
         .default_endpoint("http://default")
         .session_retry_interval(1234)
         .session_retry_limit(999)
         .session_timeout(777)
+        .single_threaded_executor()
         // TODO user tokens, endpoints
         ;
 
@@ -209,13 +282,20 @@ fn client_builder() {
 
     assert_eq!(c.application_name, "appname");
     assert_eq!(c.application_uri, "http://appname");
-    assert_eq!(c.trust_server_certs, true);
-    assert_eq!(c.create_sample_keypair, true);
     assert_eq!(c.product_uri, "http://product");
+    assert_eq!(c.create_sample_keypair, true);
+    assert_eq!(c.certificate_path, Some(PathBuf::from("certxyz")));
+    assert_eq!(c.private_key_path, Some(PathBuf::from("keyxyz")));
+    assert_eq!(c.trust_server_certs, true);
+    assert_eq!(c.verify_server_certs, false);
     assert_eq!(c.pki_dir, PathBuf::from_str("pkixyz").unwrap());
-    assert_eq!(c.preferred_locales, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    assert_eq!(
+        c.preferred_locales,
+        vec!["a".to_string(), "b".to_string(), "c".to_string()]
+    );
     assert_eq!(c.default_endpoint, "http://default");
     assert_eq!(c.session_retry_interval, 1234);
     assert_eq!(c.session_retry_limit, 999);
     assert_eq!(c.session_timeout, 777);
+    assert_eq!(c.single_threaded_executor, true);
 }

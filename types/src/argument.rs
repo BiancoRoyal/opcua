@@ -1,10 +1,11 @@
+// OPCUA for Rust
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (C) 2017-2020 Adam Lock
+
 use std::io::{Read, Write};
 
 use crate::{
-    encoding::*,
-    localized_text::LocalizedText,
-    node_id::NodeId,
-    status_codes::StatusCode,
+    encoding::*, localized_text::LocalizedText, node_id::NodeId, status_codes::StatusCode,
     string::UAString,
 };
 

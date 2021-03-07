@@ -1,9 +1,11 @@
+// OPCUA for Rust
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (C) 2017-2020 Adam Lock
+
 //! Symmetric encryption / decryption wrapper.
-use std::result::Result;
-
-use openssl::symm::{Cipher, Crypter, Mode};
-
 use opcua_types::status_code::StatusCode;
+use openssl::symm::{Cipher, Crypter, Mode};
+use std::result::Result;
 
 use crate::SecurityPolicy;
 
@@ -12,19 +14,31 @@ pub struct AesKey {
     value: Vec<u8>,
     security_policy: SecurityPolicy,
 }
-
 impl AesKey {
     pub fn new(security_policy: SecurityPolicy, value: &[u8]) -> AesKey {
-        AesKey { value: value.to_vec(), security_policy }
+        AesKey {
+            value: value.to_vec(),
+            security_policy,
+        }
     }
 
     pub fn value(&self) -> &[u8] {
         &self.value
     }
 
-    fn validate_aes_args(cipher: &Cipher, src: &[u8], iv: &[u8], dst: &mut [u8]) -> Result<(), StatusCode> {
+    fn validate_aes_args(
+        cipher: &Cipher,
+        src: &[u8],
+        iv: &[u8],
+        dst: &mut [u8],
+    ) -> Result<(), StatusCode> {
         if dst.len() < src.len() + cipher.block_size() {
-            error!("Dst buffer is too small {} vs {} + {}", src.len(), dst.len(), cipher.block_size());
+            error!(
+                "Dst buffer is too small {} vs {} + {}",
+                src.len(),
+                dst.len(),
+                cipher.block_size()
+            );
             Err(StatusCode::BadUnexpectedError)
         } else if iv.len() != 16 && iv.len() != 32 {
             // ... It would be nice to compare iv size to be exact to the key size here (should be the
@@ -40,11 +54,13 @@ impl AesKey {
 
     fn cipher(&self) -> Cipher {
         match self.security_policy {
-            SecurityPolicy::Basic128Rsa15 => {
+            SecurityPolicy::Basic128Rsa15 | SecurityPolicy::Aes128Sha256RsaOaep => {
                 // Aes128_CBC
                 Cipher::aes_128_cbc()
             }
-            SecurityPolicy::Basic256 | SecurityPolicy::Basic256Sha256 => {
+            SecurityPolicy::Basic256
+            | SecurityPolicy::Basic256Sha256
+            | SecurityPolicy::Aes256Sha256RsaPss => {
                 // Aes256_CBC
                 Cipher::aes_256_cbc()
             }
@@ -55,7 +71,13 @@ impl AesKey {
     }
 
     /// Encrypt or decrypt  data according to the mode
-    fn do_cipher(&self, mode: Mode, src: &[u8], iv: &[u8], dst: &mut [u8]) -> Result<usize, StatusCode> {
+    fn do_cipher(
+        &self,
+        mode: Mode,
+        src: &[u8],
+        iv: &[u8],
+        dst: &mut [u8],
+    ) -> Result<usize, StatusCode> {
         let cipher = self.cipher();
 
         Self::validate_aes_args(&cipher, src, iv, dst)?;
@@ -67,7 +89,8 @@ impl AesKey {
             crypter.pad(false);
             let result = crypter.update(src, dst);
             if let Ok(count) = result {
-                crypter.finalize(&mut dst[count..])
+                crypter
+                    .finalize(&mut dst[count..])
                     .map(|rest| {
                         trace!("do cipher size {}", count + rest);
                         count + rest
@@ -110,8 +133,9 @@ impl AesKey {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::thread;
+
+    use super::*;
 
     #[test]
     fn test_aeskey_cross_thread() {

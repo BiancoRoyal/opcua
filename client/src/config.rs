@@ -1,15 +1,14 @@
+// OPCUA for Rust
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (C) 2017-2020 Adam Lock
+
 //! Client configuration data.
 
-use std::{
-    self,
-    collections::BTreeMap,
-    path::PathBuf,
-    str::FromStr,
-};
+use std::{self, collections::BTreeMap, path::PathBuf, str::FromStr};
 
 use opcua_core::config::Config;
 use opcua_crypto::SecurityPolicy;
-use opcua_types::{MessageSecurityMode, UAString};
+use opcua_types::{ApplicationType, MessageSecurityMode, UAString};
 
 use crate::session_retry::SessionRetryPolicy;
 
@@ -30,7 +29,11 @@ pub struct ClientUserToken {
 
 impl ClientUserToken {
     /// Constructs a client token which holds a username and password.
-    pub fn user_pass<S, T>(user: S, password: T) -> Self where S: Into<String>, T: Into<String> {
+    pub fn user_pass<S, T>(user: S, password: T) -> Self
+    where
+        S: Into<String>,
+        T: Into<String>,
+    {
         ClientUserToken {
             user: user.into(),
             password: Some(password.into()),
@@ -40,7 +43,10 @@ impl ClientUserToken {
     }
 
     /// Constructs a client token which holds a username and paths to X509 certificate and private key.
-    pub fn x509<S>(user: S, cert_path: &PathBuf, private_key_path: &PathBuf) -> Self where S: Into<String> {
+    pub fn x509<S>(user: S, cert_path: &PathBuf, private_key_path: &PathBuf) -> Self
+    where
+        S: Into<String>,
+    {
         // Apparently on Windows, a PathBuf can hold weird non-UTF chars but they will not
         // be stored in a config file properly in any event, so this code will lossily strip them out.
         ClientUserToken {
@@ -62,12 +68,18 @@ impl ClientUserToken {
         // A token must properly represent one kind of token or it is not valid
         if self.password.is_some() {
             if self.cert_path.is_some() || self.private_key_path.is_some() {
-                error!("User token {} holds a password and certificate info - it cannot be both.", self.user);
+                error!(
+                    "User token {} holds a password and certificate info - it cannot be both.",
+                    self.user
+                );
                 valid = false;
             }
         } else {
             if self.cert_path.is_none() && self.private_key_path.is_none() {
-                error!("User token {} fails to provide a password or certificate info.", self.user);
+                error!(
+                    "User token {} fails to provide a password or certificate info.",
+                    self.user
+                );
                 valid = false;
             } else if self.cert_path.is_none() || self.private_key_path.is_none() {
                 error!("User token {} fails to provide both a certificate path and a private key path.", self.user);
@@ -94,7 +106,10 @@ pub struct ClientEndpoint {
 
 impl ClientEndpoint {
     /// Makes a client endpoint
-    pub fn new<T>(url: T) -> Self where T: Into<String> {
+    pub fn new<T>(url: T) -> Self
+    where
+        T: Into<String>,
+    {
         ClientEndpoint {
             url: url.into(),
             security_policy: SecurityPolicy::None.to_str().into(),
@@ -120,17 +135,24 @@ pub struct ClientConfig {
     pub application_name: String,
     /// The application uri
     pub application_uri: String,
+    /// Product uri
+    pub product_uri: String,
     /// Autocreates public / private keypair if they don't exist. For testing/samples only
     /// since you do not have control of the values
     pub create_sample_keypair: bool,
+    /// Custom certificate path, to be used instead of the default .der certificate path
+    pub certificate_path: Option<PathBuf>,
+    /// Custom private key path, to be used instead of the default private key path
+    pub private_key_path: Option<PathBuf>,
     /// Auto trusts server certificates. For testing/samples only unless you're sure what you're
     /// doing.
     pub trust_server_certs: bool,
-    /// Product uri
-    pub product_uri: String,
-    /// pki folder, either absolute or relative to executable
+    /// Verify server certificates. For testing/samples only unless you're sure what you're
+    /// doing.
+    pub verify_server_certs: bool,
+    /// PKI folder, either absolute or relative to executable
     pub pki_dir: PathBuf,
-    // Preferred locales
+    /// Preferred locales
     pub preferred_locales: Vec<String>,
     /// Identifier of the default endpoint
     pub default_endpoint: String,
@@ -144,6 +166,9 @@ pub struct ClientConfig {
     pub session_retry_interval: u32,
     /// Session timeout period in milliseconds
     pub session_timeout: u32,
+    /// Use a single-threaded executor. The default executor uses a thread pool with a worker
+    /// thread for each CPU core available on the system.
+    pub single_threaded_executor: bool,
 }
 
 impl Config for ClientConfig {
@@ -160,7 +185,10 @@ impl Config for ClientConfig {
             valid = false;
         }
         if self.user_tokens.contains_key(ANONYMOUS_USER_TOKEN_ID) {
-            error!("User tokens contains the reserved \"{}\" id", ANONYMOUS_USER_TOKEN_ID);
+            error!(
+                "User tokens contains the reserved \"{}\" id",
+                ANONYMOUS_USER_TOKEN_ID
+            );
             valid = false;
         }
         if self.user_tokens.contains_key("") {
@@ -175,24 +203,38 @@ impl Config for ClientConfig {
         if self.endpoints.is_empty() {
             warn!("Endpoint config contains no endpoints");
         } else {
-// Check for invalid ids in endpoints
+            // Check for invalid ids in endpoints
             if self.endpoints.contains_key("") {
                 error!("Endpoints contains an endpoint with an empty id");
                 valid = false;
             }
-            if !self.default_endpoint.is_empty() && !self.endpoints.contains_key(&self.default_endpoint) {
-                error!("Default endpoint id {} does not exist in list of endpoints", self.default_endpoint);
+            if !self.default_endpoint.is_empty()
+                && !self.endpoints.contains_key(&self.default_endpoint)
+            {
+                error!(
+                    "Default endpoint id {} does not exist in list of endpoints",
+                    self.default_endpoint
+                );
                 valid = false;
             }
-// Check for invalid security policy and modes in endpoints
+            // Check for invalid security policy and modes in endpoints
             self.endpoints.iter().for_each(|(id, e)| {
-                if SecurityPolicy::from_str(&e.security_policy).unwrap() != SecurityPolicy::Unknown {
-                    if MessageSecurityMode::Invalid == MessageSecurityMode::from(e.security_mode.as_ref()) {
-                        error!("Endpoint {} security mode {} is invalid", id, e.security_mode);
+                if SecurityPolicy::from_str(&e.security_policy).unwrap() != SecurityPolicy::Unknown
+                {
+                    if MessageSecurityMode::Invalid
+                        == MessageSecurityMode::from(e.security_mode.as_ref())
+                    {
+                        error!(
+                            "Endpoint {} security mode {} is invalid",
+                            id, e.security_mode
+                        );
                         valid = false;
                     }
                 } else {
-                    error!("Endpoint {} security policy {} is invalid", id, e.security_policy);
+                    error!(
+                        "Endpoint {} security policy {} is invalid",
+                        id, e.security_policy
+                    );
                     valid = false;
                 }
             });
@@ -204,11 +246,21 @@ impl Config for ClientConfig {
         valid
     }
 
-    fn application_name(&self) -> UAString { UAString::from(&self.application_name) }
+    fn application_name(&self) -> UAString {
+        UAString::from(&self.application_name)
+    }
 
-    fn application_uri(&self) -> UAString { UAString::from(&self.application_uri) }
+    fn application_uri(&self) -> UAString {
+        UAString::from(&self.application_uri)
+    }
 
-    fn product_uri(&self) -> UAString { UAString::from(&self.product_uri) }
+    fn product_uri(&self) -> UAString {
+        UAString::from(&self.product_uri)
+    }
+
+    fn application_type(&self) -> ApplicationType {
+        ApplicationType::Client
+    }
 }
 
 impl Default for ClientConfig {
@@ -218,16 +270,24 @@ impl Default for ClientConfig {
 }
 
 impl ClientConfig {
+    /// The default PKI directory
     pub const PKI_DIR: &'static str = "pki";
 
-    pub fn new<T>(application_name: T, application_uri: T) -> Self where T: Into<String> {
+    pub fn new<T>(application_name: T, application_uri: T) -> Self
+    where
+        T: Into<String>,
+    {
         let mut pki_dir = std::env::current_dir().unwrap();
         pki_dir.push(Self::PKI_DIR);
+
         ClientConfig {
             application_name: application_name.into(),
             application_uri: application_uri.into(),
             create_sample_keypair: false,
+            certificate_path: None,
+            private_key_path: None,
             trust_server_certs: false,
+            verify_server_certs: true,
             product_uri: String::new(),
             pki_dir,
             preferred_locales: Vec::new(),
@@ -237,7 +297,7 @@ impl ClientConfig {
             session_retry_limit: SessionRetryPolicy::DEFAULT_RETRY_LIMIT as i32,
             session_retry_interval: SessionRetryPolicy::DEFAULT_RETRY_INTERVAL_MS,
             session_timeout: 0,
+            single_threaded_executor: false,
         }
     }
 }
-

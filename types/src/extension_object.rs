@@ -1,14 +1,14 @@
+// OPCUA for Rust
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (C) 2017-2020 Adam Lock
+
 //! Contains the implementation of `ExtensionObject`.
 
 use std::io::{Cursor, Read, Write};
 
 use crate::{
-    byte_string::ByteString,
-    encoding::*,
-    node_id::NodeId,
-    node_ids::ObjectId,
-    status_codes::StatusCode,
-    string::XmlElement,
+    byte_string::ByteString, encoding::*, node_id::NodeId, node_ids::ObjectId,
+    status_codes::StatusCode, string::XmlElement,
 };
 
 /// Enumeration that holds the kinds of encoding that an ExtensionObject data may be encoded with.
@@ -72,9 +72,7 @@ impl BinaryEncoder<ExtensionObject> for ExtensionObject {
         let node_id = NodeId::decode(stream, decoding_limits)?;
         let encoding_type = u8::decode(stream, decoding_limits)?;
         let body = match encoding_type {
-            0x0 => {
-                ExtensionObjectEncoding::None
-            }
+            0x0 => ExtensionObjectEncoding::None,
             0x1 => {
                 ExtensionObjectEncoding::ByteString(ByteString::decode(stream, decoding_limits)?)
             }
@@ -86,10 +84,7 @@ impl BinaryEncoder<ExtensionObject> for ExtensionObject {
                 return Err(StatusCode::BadDecodingError);
             }
         };
-        Ok(ExtensionObject {
-            node_id,
-            body,
-        })
+        Ok(ExtensionObject { node_id, body })
     }
 }
 
@@ -109,10 +104,11 @@ impl ExtensionObject {
 
     /// Tests for empty body.
     pub fn is_empty(&self) -> bool {
-        self.is_null() || match self.body {
-            ExtensionObjectEncoding::None => true,
-            _ => false
-        }
+        self.is_null()
+            || match self.body {
+                ExtensionObjectEncoding::None => true,
+                _ => false,
+            }
     }
 
     /// Returns the object id of the thing this extension object contains, assuming the
@@ -123,8 +119,11 @@ impl ExtensionObject {
 
     /// Creates an extension object with the specified node id and the encodable object as its payload.
     /// The body is set to a byte string containing the encoded struct.
-    pub fn from_encodable<N, T>(node_id: N, encodable: &T) -> ExtensionObject where N: 'static + Into<NodeId>,
-                                                                                    T: BinaryEncoder<T> {
+    pub fn from_encodable<N, T>(node_id: N, encodable: &T) -> ExtensionObject
+    where
+        N: Into<NodeId>,
+        T: BinaryEncoder<T>,
+    {
         // Serialize to extension object
         let mut stream = Cursor::new(vec![0u8; encodable.byte_len()]);
         let _ = encodable.encode(&mut stream);
@@ -137,7 +136,10 @@ impl ExtensionObject {
     /// Decodes the inner content of the extension object and returns it. The node id is ignored
     /// for decoding. The caller supplies the binary encoder impl that should be used to extract
     /// the data. Errors result in a decoding error.
-    pub fn decode_inner<T>(&self, decoding_limits: &DecodingLimits) -> EncodingResult<T> where T: BinaryEncoder<T> {
+    pub fn decode_inner<T>(&self, decoding_limits: &DecodingLimits) -> EncodingResult<T>
+    where
+        T: BinaryEncoder<T>,
+    {
         match self.body {
             ExtensionObjectEncoding::ByteString(ref byte_string) => {
                 if let Some(ref value) = byte_string.value {

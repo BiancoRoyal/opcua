@@ -1,13 +1,19 @@
+// OPCUA for Rust
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (C) 2017-2020 Adam Lock
+
 //! Contains the hand implemented part of the StatusCode type. The other file, `status_codes.rs` contains
 //! the machine generated part.
 
 use std::{
-    io::{self, Read, Write}, fmt, fmt::Formatter,
+    fmt,
+    fmt::Formatter,
+    io::{self, Read, Write},
 };
 
 use serde::{
-    Serialize, Serializer, Deserialize, Deserializer,
     de::{self, Visitor},
+    Deserialize, Deserializer, Serialize, Serializer,
 };
 
 pub use crate::{encoding::*, status_codes::StatusCode};
@@ -94,7 +100,8 @@ impl From<StatusCode> for io::Error {
 
 impl Serialize for StatusCode {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where S: Serializer,
+    where
+        S: Serializer,
     {
         serializer.serialize_u32(self.bits())
     }
@@ -110,8 +117,8 @@ impl<'de> Visitor<'de> for StatusCodeVisitor {
     }
 
     fn visit_u32<E>(self, value: u32) -> Result<Self::Value, E>
-        where
-            E: de::Error,
+    where
+        E: de::Error,
     {
         Ok(value)
     }
@@ -119,8 +126,12 @@ impl<'de> Visitor<'de> for StatusCodeVisitor {
 
 impl<'de> Deserialize<'de> for StatusCode {
     fn deserialize<D>(deserializer: D) -> Result<Self, <D as Deserializer<'de>>::Error>
-        where D: Deserializer<'de> {
-        Ok(StatusCode::from_bits_truncate(deserializer.deserialize_u32(StatusCodeVisitor)?))
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(StatusCode::from_bits_truncate(
+            deserializer.deserialize_u32(StatusCodeVisitor)?,
+        ))
     }
 }
 
@@ -138,6 +149,12 @@ fn status_code() {
     assert!(!StatusCode::BadDecodingError.is_uncertain());
     assert!(!StatusCode::BadDecodingError.is_good());
 
-    assert_eq!((StatusCode::BadDecodingError | StatusCode::HISTORICAL_CALCULATED).status(), StatusCode::BadDecodingError);
-    assert_eq!((StatusCode::BadDecodingError | StatusCode::HISTORICAL_CALCULATED).bitflags(), StatusCode::HISTORICAL_CALCULATED);
+    assert_eq!(
+        (StatusCode::BadDecodingError | StatusCode::HISTORICAL_CALCULATED).status(),
+        StatusCode::BadDecodingError
+    );
+    assert_eq!(
+        (StatusCode::BadDecodingError | StatusCode::HISTORICAL_CALCULATED).bitflags(),
+        StatusCode::HISTORICAL_CALCULATED
+    );
 }

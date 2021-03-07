@@ -1,3 +1,7 @@
+// OPCUA for Rust
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (C) 2017-2020 Adam Lock
+
 use std::{
     sync::{Arc, RwLock},
     thread,
@@ -5,16 +9,14 @@ use std::{
 };
 
 use futures::{
-    {future, Future},
     stream::Stream,
     sync::mpsc::{unbounded, UnboundedSender},
+    {future, Future},
 };
 use tokio;
 use tokio_timer::Interval;
 
-use crate::{
-    session_state::SessionState, subscription_state::SubscriptionState,
-};
+use crate::{session_state::SessionState, subscription_state::SubscriptionState};
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum SubscriptionTimerCommand {
@@ -35,44 +37,58 @@ impl SubscriptionTimer {
     ///
     /// Each subscription timer spawned by the thread runs as a timer task associated with a
     /// subscription. The subscription timer is responsible for publish requests to the server.
-    pub(crate) fn make_timer_command_queue(session_state: Arc<RwLock<SessionState>>, subscription_state: Arc<RwLock<SubscriptionState>>) -> UnboundedSender<SubscriptionTimerCommand> {
+    pub(crate) fn make_timer_command_queue(
+        session_state: Arc<RwLock<SessionState>>,
+        subscription_state: Arc<RwLock<SubscriptionState>>,
+        single_threaded_executor: bool,
+    ) -> UnboundedSender<SubscriptionTimerCommand> {
         let (timer_command_queue, timer_receiver) = unbounded::<SubscriptionTimerCommand>();
         let _ = thread::spawn(move || {
             // This listens for timer actions to spawn
-            let timer_task = timer_receiver.take_while(|cmd| {
-                let take = *cmd != SubscriptionTimerCommand::Quit;
-                future::ok(take)
-            }).map(move |cmd| {
-                (cmd, session_state.clone(), subscription_state.clone())
-            }).for_each(|(cmd, session_state, subscription_state)| {
-                if let SubscriptionTimerCommand::CreateTimer(subscription_id) = cmd {
-                    let timer = Arc::new(RwLock::new(SubscriptionTimer {
-                        subscription_id,
-                        session_state,
-                        subscription_state: subscription_state.clone(),
-                        cancel: false,
-                    }));
-                    {
-                        let mut subscription_state = trace_write_lock_unwrap!(subscription_state);
-                        subscription_state.add_subscription_timer(timer.clone());
+            let timer_task = timer_receiver
+                .take_while(|cmd| {
+                    let take = *cmd != SubscriptionTimerCommand::Quit;
+                    future::ok(take)
+                })
+                .map(move |cmd| (cmd, session_state.clone(), subscription_state.clone()))
+                .for_each(|(cmd, session_state, subscription_state)| {
+                    if let SubscriptionTimerCommand::CreateTimer(subscription_id) = cmd {
+                        let timer = Arc::new(RwLock::new(SubscriptionTimer {
+                            subscription_id,
+                            session_state,
+                            subscription_state: subscription_state.clone(),
+                            cancel: false,
+                        }));
+                        {
+                            let mut subscription_state =
+                                trace_write_lock_unwrap!(subscription_state);
+                            subscription_state.add_subscription_timer(timer.clone());
+                        }
+                        let timer_task = Self::make_subscription_timer(timer);
+                        tokio::spawn(timer_task);
                     }
-                    let timer_task = Self::make_subscription_timer(timer);
-                    tokio::spawn(timer_task);
-                }
-                future::ok(())
-            }).map(|_| {
-                info!("Timer receiver has terminated");
-            }).map_err(|_| {
-                error!("Timer receiver has terminated with an error");
-            });
-            tokio::run(timer_task);
+                    future::ok(())
+                })
+                .map(|_| {
+                    info!("Timer receiver has terminated");
+                })
+                .map_err(|_| {
+                    error!("Timer receiver has terminated with an error");
+                });
+            if !single_threaded_executor {
+                tokio::runtime::run(timer_task);
+            } else {
+                tokio::runtime::current_thread::run(timer_task);
+            }
         });
         timer_command_queue
     }
 
     /// Makes a future that publishes requests for the subscription. This code doesn't return "impl Future"
     /// due to recursive behaviour in the take_while, so instead it returns a boxed future.
-    fn make_subscription_timer(timer: Arc<RwLock<SubscriptionTimer>>) -> Box<dyn Future<Item=(), Error=()> + Send> {
+    fn make_subscription_timer(
+        timer: Arc<RwLock<SubscriptionTimer>>,
+    ) -> Box<dyn Future<Item = (), Error = ()> + Send> {
         let publishing_interval = {
             let (subscription_id, subscription_state) = {
                 let timer = trace_read_lock_unwrap!(timer);
@@ -83,7 +99,10 @@ impl SubscriptionTimer {
             if let Some(subscription) = ss.get(subscription_id) {
                 subscription.publishing_interval()
             } else {
-                error!("Cannot start timer for subscription id {}, doesn't exist", subscription_id);
+                error!(
+                    "Cannot start timer for subscription id {}, doesn't exist",
+                    subscription_id
+                );
                 100.0
             }
         };

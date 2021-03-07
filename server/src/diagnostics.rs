@@ -1,13 +1,14 @@
+// OPCUA for Rust
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (C) 2017-2020 Adam Lock
+
 //! Provides diagnostics structures and functions for gathering information about the running
 //! state of a server.
 use opcua_types::service_types::ServerDiagnosticsSummaryDataType;
 
 use opcua_core::RUNTIME;
 
-use crate::{
-    subscriptions::subscription::Subscription,
-    session::Session,
-};
+use crate::{session::Session, subscriptions::subscription::Subscription};
 
 /// Structure that captures di                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          agnostics information for the server
 #[derive(Clone, Serialize, Debug)]
@@ -44,7 +45,8 @@ impl ServerDiagnostics {
     /// started (or restarted). The requests include all Services defined in Part 4, also requests
     /// to create sessions.
     pub(crate) fn on_rejected_security_session(&mut self) {
-        self.server_diagnostics_summary.security_rejected_session_count += 1;
+        self.server_diagnostics_summary
+            .security_rejected_session_count += 1;
     }
 
     /// Increment the number of requests that were rejected since the server was started (or restarted). The
@@ -58,11 +60,19 @@ impl ServerDiagnostics {
     pub(crate) fn on_create_session(&mut self, _session: &Session) {
         self.server_diagnostics_summary.current_session_count += 1;
         self.server_diagnostics_summary.cumulated_session_count += 1;
+        debug!(
+            "Incrementing current session count to {}",
+            self.server_diagnostics_summary.current_session_count
+        );
     }
 
     /// Decrement the number of client sessions currently established in the server.
     pub(crate) fn on_destroy_session(&mut self, _session: &Session) {
         self.server_diagnostics_summary.current_session_count -= 1;
+        debug!(
+            "Decrementing current session count to {}",
+            self.server_diagnostics_summary.current_session_count
+        );
     }
 
     /// Increment the number of subscriptions currently established in the server.

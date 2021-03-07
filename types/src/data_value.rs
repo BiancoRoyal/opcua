@@ -1,12 +1,15 @@
+// OPCUA for Rust
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (C) 2017-2020 Adam Lock
+
 //! Contains the implementation of `DataValue`.
 
 use std::io::{Read, Write};
 
 use crate::{
-    date_time::*,
-    encoding::*,
-    status_codes::StatusCode,
-    variant::Variant,
+    byte_string::ByteString, date_time::*, encoding::*, guid::Guid, localized_text::LocalizedText,
+    node_id::NodeId, qualified_name::QualifiedName, service_types::TimestampsToReturn,
+    status_codes::StatusCode, string::UAString, variant::Variant,
 };
 
 bitflags! {
@@ -105,7 +108,8 @@ impl BinaryEncoder<DataValue> for DataValue {
     }
 
     fn decode<S: Read>(stream: &mut S, decoding_limits: &DecodingLimits) -> EncodingResult<Self> {
-        let encoding_mask = DataValueFlags::from_bits_truncate(u8::decode(stream, decoding_limits)?);
+        let encoding_mask =
+            DataValueFlags::from_bits_truncate(u8::decode(stream, decoding_limits)?);
 
         // Value
         let value = if encoding_mask.contains(DataValueFlags::HAS_VALUE) {
@@ -146,13 +150,151 @@ impl BinaryEncoder<DataValue> for DataValue {
         Ok(DataValue {
             value,
             status,
-            source_picoseconds: if source_timestamp.is_some() { source_picoseconds } else { None },
+            source_picoseconds: if source_timestamp.is_some() {
+                source_picoseconds
+            } else {
+                None
+            },
             source_timestamp,
-            server_picoseconds: if server_timestamp.is_some() { server_picoseconds } else { None },
+            server_picoseconds: if server_timestamp.is_some() {
+                server_picoseconds
+            } else {
+                None
+            },
             server_timestamp,
         })
     }
 }
+
+// It would be nice if everything from here to the ... below could be condensed into a single
+// trait impl somehow because it's more or less duplicating all the code in Variant.
+
+impl From<bool> for DataValue {
+    fn from(v: bool) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<u8> for DataValue {
+    fn from(v: u8) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<i8> for DataValue {
+    fn from(v: i8) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<i16> for DataValue {
+    fn from(v: i16) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<u16> for DataValue {
+    fn from(v: u16) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<i32> for DataValue {
+    fn from(v: i32) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<u32> for DataValue {
+    fn from(v: u32) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<i64> for DataValue {
+    fn from(v: i64) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<u64> for DataValue {
+    fn from(v: u64) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<f32> for DataValue {
+    fn from(v: f32) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<f64> for DataValue {
+    fn from(v: f64) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl<'a> From<&'a str> for DataValue {
+    fn from(v: &'a str) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<String> for DataValue {
+    fn from(v: String) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<UAString> for DataValue {
+    fn from(v: UAString) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<DateTime> for DataValue {
+    fn from(v: DateTime) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<Guid> for DataValue {
+    fn from(v: Guid) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<StatusCode> for DataValue {
+    fn from(v: StatusCode) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<ByteString> for DataValue {
+    fn from(v: ByteString) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<QualifiedName> for DataValue {
+    fn from(v: QualifiedName) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<LocalizedText> for DataValue {
+    fn from(v: LocalizedText) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+
+impl From<NodeId> for DataValue {
+    fn from(v: NodeId) -> Self {
+        Self::from(Variant::from(v))
+    }
+}
+//... (see above)
 
 impl From<Variant> for DataValue {
     fn from(v: Variant) -> Self {
@@ -160,6 +302,20 @@ impl From<Variant> for DataValue {
     }
 }
 
+impl From<(Variant, StatusCode)> for DataValue {
+    fn from(v: (Variant, StatusCode)) -> Self {
+        DataValue {
+            value: Some(v.0),
+            status: Some(v.1),
+            source_timestamp: None,
+            source_picoseconds: None,
+            server_timestamp: None,
+            server_picoseconds: None,
+        }
+    }
+}
+
+/*
 impl<'a> From<(Variant, &'a DateTime)> for DataValue {
     fn from(v: (Variant, &'a DateTime)) -> Self {
         DataValue {
@@ -186,6 +342,7 @@ impl<'a> From<(Variant, &'a DateTime, &'a DateTime)> for DataValue {
         }
     }
 }
+*/
 
 impl Default for DataValue {
     fn default() -> Self {
@@ -194,14 +351,32 @@ impl Default for DataValue {
 }
 
 impl DataValue {
-    /// Creates a data value from the supplied value AND timestamps. If you are passing a value to the Attribute::Write service
+    /// Creates a `DataValue` from the supplied value with nothing else.
+    pub fn value_only<V>(value: V) -> DataValue
+    where
+        V: Into<Variant>,
+    {
+        DataValue {
+            value: Some(value.into()),
+            status: None,
+            source_timestamp: None,
+            source_picoseconds: None,
+            server_timestamp: None,
+            server_picoseconds: None,
+        }
+    }
+
+    /// Creates a `DataValue` from the supplied value AND a timestamp for now. If you are passing a value to the Attribute::Write service
     /// on a server from a server, you may consider this from the specification:
     ///
     /// _If the SourceTimestamp or the ServerTimestamp is specified, the Server shall use these values.
     /// The Server returns a Bad_WriteNotSupported error if it does not support writing of timestamps_
     ///
     /// In which case, use the `value_only()` constructor, or make explicit which fields you pass.
-    pub fn new<V>(value: V) -> DataValue where V: Into<Variant> {
+    pub fn new_now<V>(value: V) -> DataValue
+    where
+        V: Into<Variant>,
+    {
         let now = DateTime::now();
         DataValue {
             value: Some(value.into()),
@@ -210,17 +385,6 @@ impl DataValue {
             source_picoseconds: Some(0),
             server_timestamp: Some(now.clone()),
             server_picoseconds: Some(0),
-        }
-    }
-
-    pub fn value_only<V>(value: V) -> DataValue where V: Into<Variant> {
-        DataValue {
-            value: Some(value.into()),
-            status: Some(StatusCode::Good),
-            source_timestamp: None,
-            source_picoseconds: None,
-            server_timestamp: None,
-            server_picoseconds: None,
         }
     }
 
@@ -237,12 +401,55 @@ impl DataValue {
     }
 
     /// Sets the value of the data value, updating the timestamps at the same point
-    pub fn set_value<V>(&mut self, value: V, source_timestamp: &DateTime, server_timestamp: &DateTime) where V: Into<Variant> {
+    pub fn set_value<V>(
+        &mut self,
+        value: V,
+        source_timestamp: &DateTime,
+        server_timestamp: &DateTime,
+    ) where
+        V: Into<Variant>,
+    {
         self.value = Some(value.into());
         self.source_timestamp = Some(source_timestamp.clone());
         self.source_picoseconds = Some(0);
         self.server_timestamp = Some(server_timestamp.clone());
         self.server_picoseconds = Some(0);
+    }
+
+    /// Sets the timestamps of the data value based on supplied timestamps to return
+    pub fn set_timestamps(
+        &mut self,
+        timestamps_to_return: TimestampsToReturn,
+        source_timestamp: DateTime,
+        server_timestamp: DateTime,
+    ) {
+        match timestamps_to_return {
+            TimestampsToReturn::Source => {
+                self.source_timestamp = Some(source_timestamp);
+                self.source_picoseconds = Some(0);
+                self.server_timestamp = None;
+                self.server_picoseconds = None;
+            }
+            TimestampsToReturn::Server => {
+                self.source_timestamp = None;
+                self.source_picoseconds = None;
+                self.server_timestamp = Some(server_timestamp);
+                self.server_picoseconds = Some(0);
+            }
+            TimestampsToReturn::Both => {
+                self.source_timestamp = Some(source_timestamp);
+                self.source_picoseconds = Some(0);
+                self.server_timestamp = Some(server_timestamp);
+                self.server_picoseconds = Some(0);
+            }
+            TimestampsToReturn::Neither => {
+                self.source_timestamp = None;
+                self.source_picoseconds = None;
+                self.server_timestamp = None;
+                self.server_picoseconds = None;
+            }
+            _ => {}
+        }
     }
 
     /// Returns the status code or Good if there is no code on the value

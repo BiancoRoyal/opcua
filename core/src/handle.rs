@@ -1,3 +1,7 @@
+// OPCUA for Rust
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (C) 2017-2020 Adam Lock
+
 use std::u32;
 
 /// A simple handle factory for incrementing sequences of numbers.
@@ -10,10 +14,7 @@ pub struct Handle {
 impl Handle {
     /// Creates a new handle factory, that starts with the supplied number
     pub fn new(first: u32) -> Handle {
-        Handle {
-            next: first,
-            first,
-        }
+        Handle { next: first, first }
     }
 
     /// Returns the next handle to be issued, internally incrementing each time so the handle

@@ -1,3 +1,7 @@
+// OPCUA for Rust
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (C) 2017-2020 Adam Lock
+
 use uci::Engine;
 
 /// The piece on a square
@@ -280,7 +284,16 @@ impl Game {
     pub fn as_fen(&self) -> String {
         let mut result = String::with_capacity(80);
 
-        let ranks = [Rank::R8, Rank::R7, Rank::R6, Rank::R5, Rank::R4, Rank::R3, Rank::R2, Rank::R1];
+        let ranks = [
+            Rank::R8,
+            Rank::R7,
+            Rank::R6,
+            Rank::R5,
+            Rank::R4,
+            Rank::R3,
+            Rank::R2,
+            Rank::R1,
+        ];
         for r in ranks.iter() {
             result.push_str(&self.fen_rank(*r));
             result.push(if *r != Rank::R1 { '/' } else { ' ' });

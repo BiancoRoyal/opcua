@@ -1,3 +1,7 @@
+// OPCUA for Rust
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (C) 2017-2020 Adam Lock
+
 //! The codec is an implementation of a tokio Encoder/Decoder which can be used to read
 //! data from the socket in terms of frames which in our case are any of the following:
 //!
@@ -18,11 +22,12 @@ use opcua_types::{
     status_code::StatusCode,
 };
 
-use crate::{
-    comms::{
-        message_chunk::MessageChunk,
-        tcp_types::{AcknowledgeMessage, ErrorMessage, HelloMessage, MESSAGE_HEADER_LEN, MessageHeader, MessageType},
-    }
+use crate::comms::{
+    message_chunk::MessageChunk,
+    tcp_types::{
+        AcknowledgeMessage, ErrorMessage, HelloMessage, MessageHeader, MessageType,
+        MESSAGE_HEADER_LEN,
+    },
 };
 
 #[derive(Debug)]
@@ -51,7 +56,6 @@ impl Decoder for TcpCodec {
             debug!("TcpCodec decode abort flag has been set and is terminating");
             Err(io::Error::from(StatusCode::BadOperationAbandoned))
         } else if buf.len() > MESSAGE_HEADER_LEN {
-
             // Every OPC UA message has at least 8 bytes of header to be read to see what follows
 
             // Get the message header
@@ -108,14 +112,15 @@ impl TcpCodec {
     }
 
     // Writes the encodable thing into the buffer.
-    fn write<T>(&self, msg: T, buf: &mut BytesMut) -> Result<(), io::Error> where T: BinaryEncoder<T> + std::fmt::Debug {
+    fn write<T>(&self, msg: T, buf: &mut BytesMut) -> Result<(), io::Error>
+    where
+        T: BinaryEncoder<T> + std::fmt::Debug,
+    {
         buf.reserve(msg.byte_len());
-        msg.encode(&mut buf.writer())
-            .map(|_| ())
-            .map_err(|err| {
-                error!("Error writing message {:?}, err = {}", msg, err);
-                io::Error::new(io::ErrorKind::Other, format!("Error = {}", err))
-            })
+        msg.encode(&mut buf.writer()).map(|_| ()).map_err(|err| {
+            error!("Error writing message {:?}, err = {}", msg, err);
+            io::Error::new(io::ErrorKind::Other, format!("Error = {}", err))
+        })
     }
 
     fn is_abort(&self) -> bool {
@@ -124,21 +129,29 @@ impl TcpCodec {
     }
 
     /// Reads a message out of the buffer, which is assumed by now to be the proper length
-    fn decode_message(message_header: MessageHeader, buf: &mut BytesMut, decoding_limits: &DecodingLimits) -> Result<Message, StatusCode> {
+    fn decode_message(
+        message_header: MessageHeader,
+        buf: &mut BytesMut,
+        decoding_limits: &DecodingLimits,
+    ) -> Result<Message, StatusCode> {
         let mut buf = io::Cursor::new(&buf[..]);
         match message_header.message_type {
-            MessageType::Acknowledge => {
-                Ok(Message::Acknowledge(AcknowledgeMessage::decode(&mut buf, decoding_limits)?))
-            }
-            MessageType::Hello => {
-                Ok(Message::Hello(HelloMessage::decode(&mut buf, decoding_limits)?))
-            }
-            MessageType::Error => {
-                Ok(Message::Error(ErrorMessage::decode(&mut buf, decoding_limits)?))
-            }
-            MessageType::Chunk => {
-                Ok(Message::Chunk(MessageChunk::decode(&mut buf, decoding_limits)?))
-            }
+            MessageType::Acknowledge => Ok(Message::Acknowledge(AcknowledgeMessage::decode(
+                &mut buf,
+                decoding_limits,
+            )?)),
+            MessageType::Hello => Ok(Message::Hello(HelloMessage::decode(
+                &mut buf,
+                decoding_limits,
+            )?)),
+            MessageType::Error => Ok(Message::Error(ErrorMessage::decode(
+                &mut buf,
+                decoding_limits,
+            )?)),
+            MessageType::Chunk => Ok(Message::Chunk(MessageChunk::decode(
+                &mut buf,
+                decoding_limits,
+            )?)),
             MessageType::Invalid => {
                 error!("Message type for chunk is invalid.");
                 Err(StatusCode::BadCommunicationError)

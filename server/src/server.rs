@@ -1,3 +1,7 @@
+// OPCUA for Rust
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (C) 2017-2020 Adam Lock
+
 //! Provides the [`Server`] type and functionality related to it.
 
 use std::{
@@ -7,15 +11,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-use futures::{Future, future, Stream, sync::mpsc::{unbounded, UnboundedSender}};
-use tokio::{self, net::{TcpListener, TcpStream}};
+use futures::{
+    future,
+    sync::mpsc::{unbounded, UnboundedSender},
+    Future, Stream,
+};
+use tokio::{
+    self,
+    net::{TcpListener, TcpStream},
+};
 use tokio_timer::Interval;
 
-use opcua_core::{
-    completion_pact,
-    config::Config,
-    prelude::*,
-};
+use opcua_core::{completion_pact, config::Config, prelude::*};
 use opcua_crypto::*;
 use opcua_types::service_types::ServerState as ServerStateType;
 
@@ -25,12 +32,12 @@ use crate::{
     comms::transport::Transport,
     config::ServerConfig,
     constants,
-    events::audit::AuditLog,
     diagnostics::ServerDiagnostics,
+    events::audit::AuditLog,
     metrics::ServerMetrics,
     services::message_handler::MessageHandler,
     session::Session,
-    state::ServerState,
+    state::{OperationalLimits, ServerState},
     util::PollingAction,
 };
 
@@ -101,7 +108,10 @@ impl Server {
         let product_uri = UAString::from(&config.product_uri);
         let start_time = DateTime::now();
         let servers = vec![config.application_uri.clone()];
-        let base_endpoint = format!("opc.tcp://{}:{}", config.tcp_config.host, config.tcp_config.port);
+        let base_endpoint = format!(
+            "opc.tcp://{}:{}",
+            config.tcp_config.host, config.tcp_config.port
+        );
         let max_subscriptions = config.limits.max_subscriptions as usize;
         let max_monitored_items_per_sub = config.limits.max_monitored_items_per_sub as usize;
         let diagnostics = Arc::new(RwLock::new(ServerDiagnostics::default()));
@@ -111,8 +121,19 @@ impl Server {
         // TODO max string, byte string and array lengths
 
         // Security, pki auto create cert
-        let application_description = if config.create_sample_keypair { Some(config.application_description()) } else { None };
-        let (mut certificate_store, server_certificate, server_pkey) = CertificateStore::new_with_keypair(&config.pki_dir, application_description);
+        let application_description = if config.create_sample_keypair {
+            Some(config.application_description())
+        } else {
+            None
+        };
+        let (mut certificate_store, server_certificate, server_pkey) =
+            CertificateStore::new_with_x509_data(
+                &config.pki_dir,
+                false,
+                config.certificate_path.as_deref(),
+                config.private_key_path.as_deref(),
+                application_description,
+            );
         if server_certificate.is_none() || server_pkey.is_none() {
             error!("Server is missing its application instance certificate and/or its private key. Encrypted endpoints will not function correctly.")
         }
@@ -156,9 +177,6 @@ impl Server {
             default_keep_alive_count: constants::DEFAULT_KEEP_ALIVE_COUNT,
             max_keep_alive_count: constants::MAX_KEEP_ALIVE_COUNT,
             max_lifetime_count: constants::MAX_KEEP_ALIVE_COUNT * 3,
-            max_method_calls: constants::MAX_METHOD_CALLS,
-            max_nodes_per_node_management: constants::MAX_NODES_PER_NODE_MANAGEMENT,
-            max_browse_paths_per_translate: constants::MAX_BROWSE_PATHS_PER_TRANSLATE,
             diagnostics,
             abort: false,
             audit_log,
@@ -166,6 +184,7 @@ impl Server {
             unregister_nodes_callback: None,
             historical_data_provider: None,
             historical_event_provider: None,
+            operational_limits: OperationalLimits::default(),
         };
         let server_state = Arc::new(RwLock::new(server_state));
 
@@ -208,7 +227,7 @@ impl Server {
     /// by error.
     pub fn run_server(server: Arc<RwLock<Server>>) {
         // Get the address and discovery url
-        let (sock_addr, discovery_server_url) = {
+        let (sock_addr, discovery_server_url, single_threaded_executor) = {
             let server = trace_read_lock_unwrap!(server);
 
             // Debug endpoints
@@ -219,17 +238,22 @@ impl Server {
             let config = trace_read_lock_unwrap!(server_state.config);
 
             // Discovery url must be present and valid
-            let discovery_server_url = if let Some(ref discovery_server_url) = config.discovery_server_url {
-                if is_valid_opc_ua_url(discovery_server_url) {
-                    Some(discovery_server_url.clone())
+            let discovery_server_url =
+                if let Some(ref discovery_server_url) = config.discovery_server_url {
+                    if is_valid_opc_ua_url(discovery_server_url) {
+                        Some(discovery_server_url.clone())
+                    } else {
+                        None
+                    }
                 } else {
                     None
-                }
-            } else {
-                None
-            };
+                };
 
-            (sock_addr, discovery_server_url)
+            (
+                sock_addr,
+                discovery_server_url,
+                config.single_threaded_executor,
+            )
         };
 
         if sock_addr.is_none() {
@@ -242,7 +266,7 @@ impl Server {
 
         info!("Waiting for Connection");
         // This is the main tokio task
-        tokio::run({
+        let main_server_task = {
             let server = server.clone();
             let server_for_listener = server.clone();
 
@@ -304,7 +328,13 @@ impl Server {
             }).map_err(|err| {
                 error!("Server task is finished with an error {:?}", err);
             })
-        });
+        };
+
+        if !single_threaded_executor {
+            tokio::runtime::run(main_server_task);
+        } else {
+            tokio::runtime::current_thread::run(main_server_task);
+        }
         info!("Server has stopped");
     }
 
@@ -341,6 +371,13 @@ impl Server {
         self.server_metrics.clone()
     }
 
+    /// Returns the `single_threaded_executor` for the server.
+    pub fn single_threaded_executor(&self) -> bool {
+        let server_state = trace_read_lock_unwrap!(self.server_state);
+        let config = trace_read_lock_unwrap!(server_state.config);
+        config.single_threaded_executor
+    }
+
     /// Sets a flag telling the running server to abort. The abort will happen asynchronously after
     /// all sessions have disconnected.
     pub fn abort(&mut self) {
@@ -375,7 +412,11 @@ impl Server {
         info!("Base url: {}", server_state.base_endpoint);
         info!("Supported endpoints:");
         for (id, endpoint) in &config.endpoints {
-            let users: Vec<String> = endpoint.user_token_ids.iter().map(|id| id.clone()).collect();
+            let users: Vec<String> = endpoint
+                .user_token_ids
+                .iter()
+                .map(|id| id.clone())
+                .collect();
             let users = users.join(", ");
             info!("Endpoint \"{}\": {}", id, endpoint.path);
             info!("  Security Mode:    {}", endpoint.security_mode);
@@ -454,7 +495,10 @@ impl Server {
         use std::sync::Mutex;
 
         let discovery_server_url = discovery_server_url.to_string();
-        info!("Server has set a discovery server url {} which will be used to register the server", discovery_server_url);
+        info!(
+            "Server has set a discovery server url {} which will be used to register the server",
+            discovery_server_url
+        );
         let server_state = self.server_state.clone();
         let server_state_for_take = self.server_state.clone();
 
@@ -491,7 +535,10 @@ impl Server {
                         let _ = std::panic::catch_unwind(move || {
                             let server_state = trace_read_lock_unwrap!(server_state);
                             if server_state.is_running() {
-                                discovery::register_with_discovery_server(&discovery_server_url, &server_state);
+                                discovery::register_with_discovery_server(
+                                    &discovery_server_url,
+                                    &server_state,
+                                );
                             }
                         });
                     });
@@ -515,14 +562,17 @@ impl Server {
     /// implementation will move any variables into the function that are required to perform its
     /// action.
     pub fn add_polling_action<F>(&mut self, interval_ms: u64, action: F)
-        where F: Fn() + Send + Sync + 'static {
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
         // If the server is not yet running, the action is queued and is started later
         let server_state = trace_read_lock_unwrap!(self.server_state);
         if server_state.is_abort() {
             error!("Polling action added when server is aborting");
-            // DO NOTHING
+        // DO NOTHING
         } else if !server_state.is_running() {
-            self.pending_polling_actions.push((interval_ms, Box::new(action)));
+            self.pending_polling_actions
+                .push((interval_ms, Box::new(action)));
         } else {
             // Start the action immediately
             let _ = PollingAction::spawn(self.server_state.clone(), interval_ms, move || {
@@ -538,7 +588,10 @@ impl Server {
         self.pending_polling_actions
             .drain(..)
             .for_each(|(interval_ms, action)| {
-                debug!("Starting a pending polling action at rate of {} ms", interval_ms);
+                debug!(
+                    "Starting a pending polling action at rate of {} ms",
+                    interval_ms
+                );
                 let _ = PollingAction::spawn(server_state.clone(), interval_ms, move || {
                     // Call the provided action
                     action();
@@ -548,14 +601,22 @@ impl Server {
 
     /// Create a new transport.
     pub fn new_transport(&self) -> TcpTransport {
-        let session = {
-            Arc::new(RwLock::new(Session::new(self)))
-        };
+        let session = { Arc::new(RwLock::new(Session::new(self))) };
         // TODO session should be stored in a sessions list so that disconnected sessions can be
         //  reestablished if necessary
         let address_space = self.address_space.clone();
-        let message_handler = MessageHandler::new(self.certificate_store.clone(), self.server_state.clone(), session.clone(), address_space.clone());
-        TcpTransport::new(self.server_state.clone(), session, address_space, message_handler)
+        let message_handler = MessageHandler::new(
+            self.certificate_store.clone(),
+            self.server_state.clone(),
+            session.clone(),
+            address_space.clone(),
+        );
+        TcpTransport::new(
+            self.server_state.clone(),
+            session,
+            address_space,
+            message_handler,
+        )
     }
 
     /// Handles the incoming request
@@ -573,7 +634,10 @@ impl Server {
         let looping_interval_ms = {
             let server_state = trace_read_lock_unwrap!(self.server_state);
             // Get the minimum interval in ms
-            f64::min(server_state.min_publishing_interval_ms, server_state.min_sampling_interval_ms)
+            f64::min(
+                server_state.min_publishing_interval_ms,
+                server_state.min_sampling_interval_ms,
+            )
         };
 
         // Run adds a session task to the tokio session
