@@ -8,6 +8,8 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use chrono::Duration;
+
 use opcua_crypto::{
     aeskey::AesKey,
     pkey::{KeySize, PrivateKey, PublicKey},
@@ -17,7 +19,7 @@ use opcua_crypto::{
 };
 use opcua_types::{
     service_types::ChannelSecurityToken, status_code::StatusCode, write_bytes, write_u8,
-    BinaryEncoder, ByteString, DateTime, DecodingLimits, MessageSecurityMode,
+    BinaryEncoder, ByteString, DateTime, DecodingOptions, MessageSecurityMode,
 };
 
 use crate::comms::{
@@ -63,8 +65,8 @@ pub struct SecureChannel {
     remote_keys: Option<(Vec<u8>, AesKey, Vec<u8>)>,
     /// Server (i.e. our end's set of keys) Symmetric Signing Key, Decrypt Key, IV
     local_keys: Option<(Vec<u8>, AesKey, Vec<u8>)>,
-    /// Decoding limits
-    decoding_limits: DecodingLimits,
+    /// Decoding options
+    decoding_options: DecodingOptions,
 }
 
 impl From<(SecurityPolicy, MessageSecurityMode)> for SecureChannel {
@@ -84,7 +86,7 @@ impl From<(SecurityPolicy, MessageSecurityMode)> for SecureChannel {
             remote_cert: None,
             local_keys: None,
             remote_keys: None,
-            decoding_limits: DecodingLimits::default(),
+            decoding_options: DecodingOptions::default(),
         }
     }
 }
@@ -99,7 +101,7 @@ impl SecureChannel {
     pub fn new(
         certificate_store: Arc<RwLock<CertificateStore>>,
         role: Role,
-        decoding_limits: DecodingLimits,
+        decoding_options: DecodingOptions,
     ) -> SecureChannel {
         let (cert, private_key) = {
             let certificate_store = certificate_store.read().unwrap();
@@ -125,7 +127,7 @@ impl SecureChannel {
             remote_cert: None,
             local_keys: None,
             remote_keys: None,
-            decoding_limits,
+            decoding_options,
         }
     }
 
@@ -207,12 +209,19 @@ impl SecureChannel {
         self.token_id
     }
 
-    pub fn decoding_limits(&self) -> DecodingLimits {
-        self.decoding_limits
+    pub fn set_client_offset(&mut self, client_offset: Duration) {
+        self.decoding_options.client_offset = client_offset;
     }
 
-    pub fn set_(&mut self, decoding_limits: DecodingLimits) {
-        self.decoding_limits = decoding_limits;
+    pub fn set_decoding_options(&mut self, decoding_options: DecodingOptions) {
+        self.decoding_options = DecodingOptions {
+            client_offset: self.decoding_options.client_offset,
+            ..decoding_options
+        }
+    }
+
+    pub fn decoding_options(&self) -> DecodingOptions {
+        self.decoding_options
     }
 
     /// Test if the secure channel token needs to be renewed. The algorithm determines it needs
@@ -221,13 +230,11 @@ impl SecureChannel {
         if self.token_id() == 0 {
             false
         } else {
-            let now = chrono::Utc::now();
             // Check if secure channel 75% close to expiration in which case send a renew
             let renew_lifetime = (self.token_lifetime() * 3) / 4;
-            let created_at = self.token_created_at().into();
-            let renew_lifetime = chrono::Duration::milliseconds(renew_lifetime as i64);
+            let renew_lifetime = Duration::milliseconds(renew_lifetime as i64);
             // Renew the token?
-            now.signed_duration_since(created_at) > renew_lifetime
+            DateTime::now() - self.token_created_at() > renew_lifetime
         }
     }
 
@@ -385,11 +392,9 @@ impl SecureChannel {
 
     /// Test if the token has expired yet
     pub fn token_has_expired(&self) -> bool {
-        let now: chrono::DateTime<chrono::Utc> = DateTime::now().into();
-        let token_created_at: chrono::DateTime<chrono::Utc> = self.token_created_at.clone().into();
-        let token_expires =
-            token_created_at + chrono::Duration::seconds(self.token_lifetime as i64);
-        now.ge(&token_expires)
+        let token_created_at = self.token_created_at;
+        let token_expires = token_created_at + Duration::seconds(self.token_lifetime as i64);
+        DateTime::now().ge(&token_expires)
     }
 
     /// Calculates the signature size for a message depending on the supplied security header
@@ -522,18 +527,18 @@ impl SecureChannel {
         Self::update_message_size_and_truncate(
             stream.into_inner(),
             message_size,
-            &self.decoding_limits,
+            &self.decoding_options,
         )
     }
 
     fn update_message_size(
         data: &mut [u8],
         message_size: usize,
-        decoding_limits: &DecodingLimits,
+        decoding_options: &DecodingOptions,
     ) -> Result<(), StatusCode> {
         // Read and rewrite the message_size in the header
         let mut stream = Cursor::new(data);
-        let mut message_header = MessageChunkHeader::decode(&mut stream, &decoding_limits)?;
+        let mut message_header = MessageChunkHeader::decode(&mut stream, &decoding_options)?;
         stream.set_position(0);
         let old_message_size = message_header.message_size;
         message_header.message_size = message_size as u32;
@@ -550,9 +555,9 @@ impl SecureChannel {
     pub fn update_message_size_and_truncate(
         mut data: Vec<u8>,
         message_size: usize,
-        decoding_limits: &DecodingLimits,
+        decoding_options: &DecodingOptions,
     ) -> Result<Vec<u8>, StatusCode> {
-        Self::update_message_size(&mut data[..], message_size, decoding_limits)?;
+        Self::update_message_size(&mut data[..], message_size, decoding_options)?;
         // Truncate vector to the size
         data.truncate(message_size);
         Ok(data)
@@ -590,7 +595,7 @@ impl SecureChannel {
             let encrypted_range = chunk_info.sequence_header_offset..data.len();
 
             // Encrypt and sign - open secure channel
-            let encrypted_size = if message_chunk.is_open_secure_channel(&self.decoding_limits) {
+            let encrypted_size = if message_chunk.is_open_secure_channel(&self.decoding_options) {
                 self.asymmetric_sign_and_encrypt(self.security_policy, &data, encrypted_range, dst)?
             } else {
                 // Symmetric encrypt and sign
@@ -630,16 +635,16 @@ impl SecureChannel {
         // Get message & security header from data
         let (message_header, security_header, encrypted_data_offset) = {
             let mut stream = Cursor::new(&src);
-            let message_header = MessageChunkHeader::decode(&mut stream, &self.decoding_limits)?;
+            let message_header = MessageChunkHeader::decode(&mut stream, &self.decoding_options)?;
             let security_header = if message_header.message_type.is_open_secure_channel() {
                 SecurityHeader::Asymmetric(AsymmetricSecurityHeader::decode(
                     &mut stream,
-                    &self.decoding_limits,
+                    &self.decoding_options,
                 )?)
             } else {
                 SecurityHeader::Symmetric(SymmetricSecurityHeader::decode(
                     &mut stream,
-                    &self.decoding_limits,
+                    &self.decoding_options,
                 )?)
             };
             let encrypted_data_offset = stream.position() as usize;
@@ -736,7 +741,7 @@ impl SecureChannel {
             Self::update_message_size_and_truncate(
                 decrypted_data,
                 decrypted_size,
-                &self.decoding_limits,
+                &self.decoding_options,
             )?
         } else if self.security_policy != SecurityPolicy::None
             && (self.security_mode == MessageSecurityMode::Sign
@@ -764,7 +769,7 @@ impl SecureChannel {
             Self::update_message_size_and_truncate(
                 decrypted_data,
                 decrypted_size - signature_size,
-                &self.decoding_limits,
+                &self.decoding_options,
             )?
         } else {
             src.to_vec()
@@ -814,7 +819,7 @@ impl SecureChannel {
         Self::update_message_size(
             &mut tmp[..],
             header_size + cipher_text_size,
-            &self.decoding_limits,
+            &self.decoding_options,
         )?;
 
         // Sign the message header, security header, sequence header, body, padding

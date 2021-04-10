@@ -225,7 +225,7 @@ impl ClientBuilder {
         self
     }
 
-    /// Sets the session retry limit
+    /// Sets the session retry limit.
     pub fn session_retry_limit(mut self, session_retry_limit: i32) -> Self {
         if session_retry_limit < 0 && session_retry_limit != -1 {
             panic!("Session retry limit must be -1, 0 or a positive number");
@@ -234,22 +234,29 @@ impl ClientBuilder {
         self
     }
 
-    /// Sets the session retry limit
+    /// Sets the session retry interval.
     pub fn session_retry_interval(mut self, session_retry_interval: u32) -> Self {
         self.config.session_retry_interval = session_retry_interval;
         self
     }
 
-    /// Sets the session timeout period
+    /// Sets the session timeout period.
     pub fn session_timeout(mut self, session_timeout: u32) -> Self {
         self.config.session_timeout = session_timeout;
+        self
+    }
+
+    /// Sets whether the client should ignore clock skew so the client can make a successful
+    /// connection to the server, even when the client and server clocks are out of sync.
+    pub fn ignore_clock_skew(mut self) -> Self {
+        self.config.performance.ignore_clock_skew = true;
         self
     }
 
     /// Configures the client to use a single-threaded executor. The default executor uses a
     /// thread pool with a worker thread for each CPU core available on the system.
     pub fn single_threaded_executor(mut self) -> Self {
-        self.config.single_threaded_executor = true;
+        self.config.performance.single_threaded_executor = true;
         self
     }
 
@@ -283,6 +290,7 @@ fn client_builder() {
         .session_retry_interval(1234)
         .session_retry_limit(999)
         .session_timeout(777)
+        .ignore_clock_skew()
         .single_threaded_executor()
         .session_name("SessionName")
         // TODO user tokens, endpoints
@@ -307,6 +315,7 @@ fn client_builder() {
     assert_eq!(c.session_retry_interval, 1234);
     assert_eq!(c.session_retry_limit, 999);
     assert_eq!(c.session_timeout, 777);
-    assert_eq!(c.single_threaded_executor, true);
+    assert_eq!(c.performance.ignore_clock_skew, true);
+    assert_eq!(c.performance.single_threaded_executor, true);
     assert_eq!(c.session_name, "SessionName");
 }

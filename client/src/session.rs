@@ -18,8 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use futures::{future, stream::Stream, sync::mpsc::UnboundedSender, Future};
-use tokio;
+use futures::{future, stream::Stream, Future};
 use tokio_timer::Interval;
 
 use opcua_core::{
@@ -49,7 +48,6 @@ use crate::{
     session_state::{ConnectionState, SessionState},
     subscription::{self, Subscription},
     subscription_state::SubscriptionState,
-    subscription_timer::{SubscriptionTimer, SubscriptionTimerCommand},
 };
 
 macro_rules! session_warn {
@@ -104,6 +102,24 @@ impl Into<SessionInfo> for (EndpointDescription, client::IdentityToken) {
     }
 }
 
+/// Enumeration used with Session::history_read()
+pub enum HistoryReadDetails {
+    ReadEventDetails(ReadEventDetails),
+    ReadRawModifiedDetails(ReadRawModifiedDetails),
+    ReadProcessedDetails(ReadProcessedDetails),
+    ReadAtTimeDetails(ReadAtTimeDetails),
+}
+
+/// Enumeration used with Session::history_update()
+pub enum HistoryUpdateDetails {
+    UpdateDataDetails(UpdateDataDetails),
+    UpdateStructureDataDetails(UpdateStructureDataDetails),
+    UpdateEventDetails(UpdateEventDetails),
+    DeleteRawModifiedDetails(DeleteRawModifiedDetails),
+    DeleteAtTimeDetails(DeleteAtTimeDetails),
+    DeleteEventDetails(DeleteEventDetails),
+}
+
 /// A `Session` runs in a loop, which can be terminated by sending it a `SessionCommand`.
 pub enum SessionCommand {
     /// Stop running as soon as possible
@@ -129,8 +145,6 @@ pub struct Session {
     session_state: Arc<RwLock<SessionState>>,
     /// Subscriptions state.
     subscription_state: Arc<RwLock<SubscriptionState>>,
-    /// Subscription timer command.
-    timer_command_queue: UnboundedSender<SubscriptionTimerCommand>,
     /// Transport layer.
     transport: TcpTransport,
     /// Certificate store.
@@ -141,6 +155,8 @@ pub struct Session {
     message_queue: Arc<RwLock<MessageQueue>>,
     /// Session retry policy.
     session_retry_policy: SessionRetryPolicy,
+    /// Ignore clock skew between the client and the server.
+    ignore_clock_skew: bool,
     /// Use a single-threaded executor.
     single_threaded_executor: bool,
 }
@@ -172,23 +188,25 @@ impl Session {
         certificate_store: Arc<RwLock<CertificateStore>>,
         session_info: SessionInfo,
         session_retry_policy: SessionRetryPolicy,
+        ignore_clock_skew: bool,
         single_threaded_executor: bool,
     ) -> Session
     where
         T: Into<UAString>,
     {
         // TODO take these from the client config
-        let decoding_limits = DecodingLimits::default();
+        let decoding_options = DecodingOptions::default();
 
         let session_name = session_name.into();
 
         let secure_channel = Arc::new(RwLock::new(SecureChannel::new(
             certificate_store.clone(),
             Role::Client,
-            decoding_limits,
+            decoding_options,
         )));
         let message_queue = Arc::new(RwLock::new(MessageQueue::new()));
         let session_state = Arc::new(RwLock::new(SessionState::new(
+            ignore_clock_skew,
             secure_channel.clone(),
             message_queue.clone(),
         )));
@@ -199,11 +217,6 @@ impl Session {
             single_threaded_executor,
         );
         let subscription_state = Arc::new(RwLock::new(SubscriptionState::new()));
-        let timer_command_queue = SubscriptionTimer::make_timer_command_queue(
-            session_state.clone(),
-            subscription_state.clone(),
-            single_threaded_executor,
-        );
         Session {
             application_description,
             session_name,
@@ -211,11 +224,11 @@ impl Session {
             session_state,
             certificate_store,
             subscription_state,
-            timer_command_queue,
             transport,
             secure_channel,
             message_queue,
             session_retry_policy,
+            ignore_clock_skew,
             single_threaded_executor,
         }
     }
@@ -227,14 +240,9 @@ impl Session {
             secure_channel.clear_security_token();
         }
 
-        // Cancel any subscription timers
-        {
-            let mut subscription_state = trace_write_lock_unwrap!(self.subscription_state);
-            subscription_state.cancel_subscription_timers();
-        }
-
         // Create a new session state
         self.session_state = Arc::new(RwLock::new(SessionState::new(
+            self.ignore_clock_skew,
             self.secure_channel.clone(),
             self.message_queue.clone(),
         )));
@@ -244,13 +252,6 @@ impl Session {
             self.secure_channel.clone(),
             self.session_state.clone(),
             self.message_queue.clone(),
-            self.single_threaded_executor,
-        );
-
-        // Create a new timer command queue
-        self.timer_command_queue = SubscriptionTimer::make_timer_command_queue(
-            self.session_state.clone(),
-            self.subscription_state.clone(),
             self.single_threaded_executor,
         );
     }
@@ -431,7 +432,7 @@ impl Session {
                                         client_handle: item.client_handle(),
                                         sampling_interval: item.sampling_interval(),
                                         filter: ExtensionObject::null(),
-                                        queue_size: item.queue_size(),
+                                        queue_size: item.queue_size() as u32,
                                         discard_oldest: true,
                                     },
                                 })
@@ -471,18 +472,6 @@ impl Session {
                         );
                     }
                 });
-
-            // Now all the subscriptions should have been recreated, it should be possible
-            // to kick off the publish timers.
-            let subscription_ids = {
-                let subscription_state = trace_read_lock_unwrap!(subscription_state);
-                subscription_state.subscription_ids().unwrap()
-            };
-            for subscription_id in &subscription_ids {
-                let _ = self
-                    .timer_command_queue
-                    .unbounded_send(SubscriptionTimerCommand::CreateTimer(*subscription_id));
-            }
         }
         Ok(())
     }
@@ -507,15 +496,17 @@ impl Session {
                         self.session_retry_policy.retry_count()
                     );
 
-                    use chrono::Utc;
-                    match self.session_retry_policy.should_retry_connect(Utc::now()) {
+                    match self
+                        .session_retry_policy
+                        .should_retry_connect(DateTime::now())
+                    {
                         Answer::GiveUp => {
                             session_error!(self, "Session has given up trying to connect to the server after {} retries", self.session_retry_policy.retry_count());
                             return Err(StatusCode::BadNotConnected);
                         }
                         Answer::Retry => {
                             info!("Retrying to connect to server...");
-                            self.session_retry_policy.set_last_attempt(Utc::now());
+                            self.session_retry_policy.set_last_attempt(DateTime::now());
                         }
                         Answer::WaitFor(sleep_for) => {
                             // Sleep for the instructed interval before looping around and trying
@@ -723,8 +714,10 @@ impl Session {
         let did_something = if self.is_connected() {
             self.handle_publish_responses()
         } else {
-            use chrono::Utc;
-            match self.session_retry_policy.should_retry_connect(Utc::now()) {
+            match self
+                .session_retry_policy
+                .should_retry_connect(DateTime::now())
+            {
                 Answer::GiveUp => {
                     session_error!(
                         self,
@@ -735,7 +728,7 @@ impl Session {
                 }
                 Answer::Retry => {
                     info!("Retrying to reconnect to server...");
-                    self.session_retry_policy.set_last_attempt(Utc::now());
+                    self.session_retry_policy.set_last_attempt(DateTime::now());
                     if self.reconnect_and_activate().is_ok() {
                         info!("Retry to connect was successful");
                         self.session_retry_policy.reset_retry_count();
@@ -1722,13 +1715,13 @@ impl Session {
         }
     }
 
-    /// Reads historical values or events of one or more nodes. The caller is expected to encode a history read
-    /// operation into an extension object which must be one of the following:
+    /// Reads historical values or events of one or more nodes. The caller is expected to provide
+    /// a HistoryReadDetails enum which must be one of the following:
     ///
-    /// * ReadEventDetails
-    /// * ReadRawModifiedDetails
-    /// * ReadProcessedDetails
-    /// * ReadAtTimeDetails
+    /// * HistoryReadDetails::ReadEventDetails
+    /// * HistoryReadDetails::ReadRawModifiedDetails
+    /// * HistoryReadDetails::ReadProcessedDetails
+    /// * HistoryReadDetails::ReadAtTimeDetails
     ///
     /// See OPC UA Part 4 - Services 5.10.3 for complete description of the service and error responses.
     ///
@@ -1746,58 +1739,59 @@ impl Session {
     ///
     pub fn history_read(
         &mut self,
-        history_read_details: ExtensionObject,
+        history_read_details: HistoryReadDetails,
         timestamps_to_return: TimestampsToReturn,
         release_continuation_points: bool,
         nodes_to_read: &[HistoryReadValueId],
     ) -> Result<Vec<HistoryReadResult>, StatusCode> {
-        // Validate the read operation
-        let valid_operation = Self::node_id_is_one_of(
-            &history_read_details.node_id,
-            &[
+        // Turn the enum into an extension object
+        let history_read_details = match history_read_details {
+            HistoryReadDetails::ReadEventDetails(v) => ExtensionObject::from_encodable(
                 ObjectId::ReadEventDetails_Encoding_DefaultBinary,
+                &v,
+            ),
+            HistoryReadDetails::ReadRawModifiedDetails(v) => ExtensionObject::from_encodable(
                 ObjectId::ReadRawModifiedDetails_Encoding_DefaultBinary,
+                &v,
+            ),
+            HistoryReadDetails::ReadProcessedDetails(v) => ExtensionObject::from_encodable(
                 ObjectId::ReadProcessedDetails_Encoding_DefaultBinary,
+                &v,
+            ),
+            HistoryReadDetails::ReadAtTimeDetails(v) => ExtensionObject::from_encodable(
                 ObjectId::ReadAtTimeDetails_Encoding_DefaultBinary,
-            ],
-        );
-        if !valid_operation {
-            session_error!(
-                self,
-                "history_read(), was called with an invalid history update operation"
-            );
-            Err(StatusCode::BadHistoryOperationUnsupported)
-        } else {
-            let request = HistoryReadRequest {
-                request_header: self.make_request_header(),
-                history_read_details,
-                timestamps_to_return,
-                release_continuation_points,
-                nodes_to_read: if nodes_to_read.is_empty() {
-                    None
-                } else {
-                    Some(nodes_to_read.to_vec())
-                },
-            };
-            session_debug!(
-                self,
-                "history_read() requested to read nodes {:?}",
-                nodes_to_read
-            );
-            let response = self.send_request(request)?;
-            if let SupportedMessage::HistoryReadResponse(response) = response {
-                session_debug!(self, "history_read(), success");
-                crate::process_service_result(&response.response_header)?;
-                let results = if let Some(results) = response.results {
-                    results
-                } else {
-                    Vec::new()
-                };
-                Ok(results)
+                &v,
+            ),
+        };
+        let request = HistoryReadRequest {
+            request_header: self.make_request_header(),
+            history_read_details,
+            timestamps_to_return,
+            release_continuation_points,
+            nodes_to_read: if nodes_to_read.is_empty() {
+                None
             } else {
-                session_error!(self, "history_read() value failed");
-                Err(crate::process_unexpected_response(response))
-            }
+                Some(nodes_to_read.to_vec())
+            },
+        };
+        session_debug!(
+            self,
+            "history_read() requested to read nodes {:?}",
+            nodes_to_read
+        );
+        let response = self.send_request(request)?;
+        if let SupportedMessage::HistoryReadResponse(response) = response {
+            session_debug!(self, "history_read(), success");
+            crate::process_service_result(&response.response_header)?;
+            let results = if let Some(results) = response.results {
+                results
+            } else {
+                Vec::new()
+            };
+            Ok(results)
+        } else {
+            session_error!(self, "history_read() value failed");
+            Err(crate::process_unexpected_response(response))
         }
     }
 
@@ -1840,8 +1834,8 @@ impl Session {
         }
     }
 
-    /// Updates historical values. The caller is expected to encode history update operations into
-    /// extension objects which must be one of the following:
+    /// Updates historical values. The caller is expected to provide one or more history update operations
+    /// in a slice of HistoryUpdateDetails enums which are one of the following:
     ///
     /// * UpdateDataDetails
     /// * UpdateStructureDataDetails
@@ -1863,7 +1857,7 @@ impl Session {
     ///
     pub fn history_update(
         &mut self,
-        history_update_details: &[ExtensionObject],
+        history_update_details: &[HistoryUpdateDetails],
     ) -> Result<Vec<HistoryUpdateResult>, StatusCode> {
         if history_update_details.is_empty() {
             // No subscriptions
@@ -1873,44 +1867,60 @@ impl Session {
             );
             Err(StatusCode::BadNothingToDo)
         } else {
-            let valid_operation = !history_update_details.iter().any(|h| {
-                !Self::node_id_is_one_of(
-                    &h.node_id,
-                    &[
+            // Turn the enums into ExtensionObjects
+            let history_update_details = history_update_details
+                .iter()
+                .map(|v| match v {
+                    HistoryUpdateDetails::UpdateDataDetails(v) => ExtensionObject::from_encodable(
                         ObjectId::UpdateDataDetails_Encoding_DefaultBinary,
-                        ObjectId::UpdateStructureDataDetails_Encoding_DefaultBinary,
+                        v,
+                    ),
+                    HistoryUpdateDetails::UpdateStructureDataDetails(v) => {
+                        ExtensionObject::from_encodable(
+                            ObjectId::UpdateStructureDataDetails_Encoding_DefaultBinary,
+                            v,
+                        )
+                    }
+                    HistoryUpdateDetails::UpdateEventDetails(v) => ExtensionObject::from_encodable(
                         ObjectId::UpdateEventDetails_Encoding_DefaultBinary,
-                        ObjectId::DeleteRawModifiedDetails_Encoding_DefaultBinary,
-                        ObjectId::DeleteAtTimeDetails_Encoding_DefaultBinary,
+                        v,
+                    ),
+                    HistoryUpdateDetails::DeleteRawModifiedDetails(v) => {
+                        ExtensionObject::from_encodable(
+                            ObjectId::DeleteRawModifiedDetails_Encoding_DefaultBinary,
+                            v,
+                        )
+                    }
+                    HistoryUpdateDetails::DeleteAtTimeDetails(v) => {
+                        ExtensionObject::from_encodable(
+                            ObjectId::DeleteAtTimeDetails_Encoding_DefaultBinary,
+                            v,
+                        )
+                    }
+                    HistoryUpdateDetails::DeleteEventDetails(v) => ExtensionObject::from_encodable(
                         ObjectId::DeleteEventDetails_Encoding_DefaultBinary,
-                    ],
-                )
-            });
-            if !valid_operation {
-                session_error!(
-                    self,
-                    "history_update(), was called with an invalid history update operation"
-                );
-                Err(StatusCode::BadHistoryOperationUnsupported)
-            } else {
-                let request = HistoryUpdateRequest {
-                    request_header: self.make_request_header(),
-                    history_update_details: Some(history_update_details.to_vec()),
-                };
-                let response = self.send_request(request)?;
-                if let SupportedMessage::HistoryUpdateResponse(response) = response {
-                    session_debug!(self, "history_update(), success");
-                    crate::process_service_result(&response.response_header)?;
-                    let results = if let Some(results) = response.results {
-                        results
-                    } else {
-                        Vec::new()
-                    };
-                    Ok(results)
+                        v,
+                    ),
+                })
+                .collect::<Vec<ExtensionObject>>();
+
+            let request = HistoryUpdateRequest {
+                request_header: self.make_request_header(),
+                history_update_details: Some(history_update_details.to_vec()),
+            };
+            let response = self.send_request(request)?;
+            if let SupportedMessage::HistoryUpdateResponse(response) = response {
+                session_debug!(self, "history_update(), success");
+                crate::process_service_result(&response.response_header)?;
+                let results = if let Some(results) = response.results {
+                    results
                 } else {
-                    session_error!(self, "history_update() failed {:?}", response);
-                    Err(crate::process_unexpected_response(response))
-                }
+                    Vec::new()
+                };
+                Ok(results)
+            } else {
+                session_error!(self, "history_update() failed {:?}", response);
+                Err(crate::process_unexpected_response(response))
             }
         }
     }
@@ -2500,17 +2510,18 @@ impl Session {
                 callback,
             );
 
+            // Add the new subscription to the subscription state
             {
-                let subscription_id = {
-                    let mut subscription_state = trace_write_lock_unwrap!(self.subscription_state);
-                    let subscription_id = subscription.subscription_id();
-                    subscription_state.add_subscription(subscription);
-                    subscription_id
-                };
-                let _ = self
-                    .timer_command_queue
-                    .unbounded_send(SubscriptionTimerCommand::CreateTimer(subscription_id));
+                let mut subscription_state = trace_write_lock_unwrap!(self.subscription_state);
+                subscription_state.add_subscription(subscription);
             }
+
+            // Send an async publish request for this new subscription
+            {
+                let mut session_state = trace_write_lock_unwrap!(self.session_state);
+                let _ = session_state.async_publish();
+            }
+
             session_debug!(
                 self,
                 "create_subscription, created a subscription with id {}",
@@ -3031,7 +3042,6 @@ impl Session {
     /// notifications to the client for processing.
     fn handle_async_response(&mut self, response: SupportedMessage) {
         session_debug!(self, "handle_async_response");
-        let mut wait_for_publish_response = false;
         match response {
             SupportedMessage::PublishResponse(response) => {
                 session_debug!(self, "PublishResponse");
@@ -3041,23 +3051,27 @@ impl Session {
                 let notification_message = response.notification_message.clone();
                 let subscription_id = response.subscription_id;
 
-                // Queue an acknowledgement for this request
-                {
-                    let mut session_state = trace_write_lock_unwrap!(self.session_state);
-                    session_state.add_subscription_acknowledgement(SubscriptionAcknowledgement {
-                        subscription_id,
-                        sequence_number: notification_message.sequence_number,
-                    });
+                // Queue an acknowledgement for this request (if it has data)
+                if let Some(ref notification_data) = notification_message.notification_data {
+                    if !notification_data.is_empty() {
+                        let mut session_state = trace_write_lock_unwrap!(self.session_state);
+                        session_state.add_subscription_acknowledgement(
+                            SubscriptionAcknowledgement {
+                                subscription_id,
+                                sequence_number: notification_message.sequence_number,
+                            },
+                        );
+                    }
                 }
 
-                let decoding_limits = {
+                let decoding_options = {
                     let secure_channel = trace_read_lock_unwrap!(self.secure_channel);
-                    secure_channel.decoding_limits()
+                    secure_channel.decoding_options()
                 };
 
                 // Process data change notifications
                 if let Some((data_change_notifications, events)) =
-                    notification_message.notifications(&decoding_limits)
+                    notification_message.notifications(&decoding_options)
                 {
                     session_debug!(
                         self,
@@ -3077,6 +3091,12 @@ impl Session {
                         subscription_state.on_event(subscription_id, &events);
                     }
                 }
+
+                // Send another publish request
+                {
+                    let mut session_state = trace_write_lock_unwrap!(self.session_state);
+                    let _ = session_state.async_publish();
+                }
             }
             SupportedMessage::ServiceFault(response) => {
                 let service_result = response.response_header.service_result;
@@ -3088,9 +3108,14 @@ impl Session {
                 session_trace!(self, "ServiceFault {:?}", response);
 
                 match service_result {
+                    StatusCode::BadTimeout => {
+                        debug!("Publish request timed out so sending another");
+                        let mut session_state = trace_write_lock_unwrap!(self.session_state);
+                        let _ = session_state.async_publish();
+                    }
                     StatusCode::BadTooManyPublishRequests => {
                         // Turn off publish requests until server says otherwise
-                        wait_for_publish_response = true
+                        debug!("Server tells us too many publish requests so waiting for a response before resuming");
                     }
                     StatusCode::BadSessionClosed | StatusCode::BadSessionIdInvalid => {
                         let mut session_state = trace_write_lock_unwrap!(self.session_state);
@@ -3103,20 +3128,5 @@ impl Session {
                 info!("{} unhandled response", self.session_id());
             }
         }
-
-        // Turn on/off publish requests
-        {
-            let mut session_state = trace_write_lock_unwrap!(self.session_state);
-            session_state.set_wait_for_publish_response(wait_for_publish_response);
-        }
-    }
-
-    /// Test if the supplied node id matches one of the supplied object ids. i.e. it must be in namespace 0,
-    /// and have a numeric value that matches the scalar value of the supplied enums.
-    pub(crate) fn node_id_is_one_of(node_id: &NodeId, object_ids: &[ObjectId]) -> bool {
-        node_id
-            .as_object_id()
-            .map(|object_id| object_ids.iter().any(|v| object_id == *v))
-            .unwrap_or(false)
     }
 }

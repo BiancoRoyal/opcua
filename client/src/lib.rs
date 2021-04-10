@@ -79,7 +79,7 @@
 //!
 //! fn print_value(item: &MonitoredItem) {
 //!    let node_id = &item.item_to_monitor().node_id;
-//!    let data_value = item.value();
+//!    let data_value = item.last_value();
 //!    if let Some(ref value) = data_value.value {
 //!        println!("Item \"{}\", Value = {:?}", node_id, value);
 //!    } else {
@@ -109,7 +109,6 @@ mod message_queue;
 mod session_state;
 mod subscription;
 mod subscription_state;
-mod subscription_timer;
 
 // Use through prelude
 mod builder;

@@ -107,42 +107,47 @@ impl BinaryEncoder<DataValue> for DataValue {
         Ok(size)
     }
 
-    fn decode<S: Read>(stream: &mut S, decoding_limits: &DecodingLimits) -> EncodingResult<Self> {
+    fn decode<S: Read>(stream: &mut S, decoding_options: &DecodingOptions) -> EncodingResult<Self> {
         let encoding_mask =
-            DataValueFlags::from_bits_truncate(u8::decode(stream, decoding_limits)?);
+            DataValueFlags::from_bits_truncate(u8::decode(stream, decoding_options)?);
 
         // Value
         let value = if encoding_mask.contains(DataValueFlags::HAS_VALUE) {
-            Some(Variant::decode(stream, decoding_limits)?)
+            Some(Variant::decode(stream, decoding_options)?)
         } else {
             None
         };
         // Status
         let status = if encoding_mask.contains(DataValueFlags::HAS_STATUS) {
-            let status = StatusCode::from_bits_truncate(u32::decode(stream, decoding_limits)?);
+            let status = StatusCode::from_bits_truncate(u32::decode(stream, decoding_options)?);
             Some(status)
         } else {
             None
         };
         // Source timestamp
         let source_timestamp = if encoding_mask.contains(DataValueFlags::HAS_SOURCE_TIMESTAMP) {
-            Some(DateTime::decode(stream, decoding_limits)?)
+            // The source timestamp should never be adjusted, not even when ignoring clock skew
+            let decoding_options = DecodingOptions {
+                client_offset: chrono::Duration::zero(),
+                ..*decoding_options
+            };
+            Some(DateTime::decode(stream, &decoding_options)?)
         } else {
             None
         };
         let source_picoseconds = if encoding_mask.contains(DataValueFlags::HAS_SOURCE_PICOSECONDS) {
-            Some(i16::decode(stream, decoding_limits)?)
+            Some(i16::decode(stream, decoding_options)?)
         } else {
             None
         };
         // Server timestamp
         let server_timestamp = if encoding_mask.contains(DataValueFlags::HAS_SERVER_TIMESTAMP) {
-            Some(DateTime::decode(stream, decoding_limits)?)
+            Some(DateTime::decode(stream, decoding_options)?)
         } else {
             None
         };
         let server_picoseconds = if encoding_mask.contains(DataValueFlags::HAS_SERVER_PICOSECONDS) {
-            Some(i16::decode(stream, decoding_limits)?)
+            Some(i16::decode(stream, decoding_options)?)
         } else {
             None
         };

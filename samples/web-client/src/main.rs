@@ -1,4 +1,5 @@
 // OPCUA for Rust
+// OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
 // Copyright (C) 2017-2020 Adam Lock
 
@@ -286,7 +287,7 @@ impl OPCUASession {
             return;
         }
         let event_node_id = args.get(0).unwrap();
-        let _where_clause = args.get(1).unwrap();
+        let where_clause = args.get(1).unwrap();
         let select_criteria = args.get(2).unwrap();
 
         if let Some(ref mut session) = self.session {
@@ -298,7 +299,6 @@ impl OPCUASession {
             }
             let event_node_id = event_node_id.unwrap();
 
-            let where_clause = ""; // TODO remove
             let where_clause = if where_clause.is_empty() {
                 ContentFilter { elements: None }
             } else {
@@ -345,7 +345,7 @@ impl OPCUASession {
             // Select clauses
             let select_clauses = Some(
                 select_criteria
-                    .split('|')
+                    .split(',')
                     .map(|s| SimpleAttributeOperand {
                         type_definition_id: ObjectTypeId::BaseEventType.into(),
                         browse_path: Some(vec![QualifiedName::from(s)]),
@@ -372,7 +372,7 @@ impl OPCUASession {
 
             // create a subscription containing events
             if let Ok(subscription_id) =
-                session.create_subscription(2000.0, 100, 300, 0, 0, true, event_callback)
+                session.create_subscription(500.0, 100, 300, 0, 0, true, event_callback)
             {
                 // Monitor the item for events
                 let mut item_to_create: MonitoredItemCreateRequest = event_node_id.into();
@@ -415,7 +415,7 @@ impl OPCUASession {
                         DataChangeEvent {
                             node_id: item_to_monitor.node_id.clone().into(),
                             attribute_id: item_to_monitor.attribute_id,
-                            value: item.value().clone(),
+                            value: item.last_value().clone(),
                         }
                     })
                     .collect::<Vec<_>>();

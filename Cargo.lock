@@ -1474,7 +1474,6 @@ dependencies = [
  "opcua-types",
  "serde",
  "serde_derive",
- "time",
  "tokio",
  "tokio-codec",
  "tokio-io",
@@ -1544,11 +1543,21 @@ dependencies = [
  "log4rs",
  "opcua-console-logging",
  "opcua-server",
+ "pico-args",
  "rand 0.7.3",
 ]
 
 [[package]]
 name = "opcua-discovery-client"
+version = "0.9.0"
+dependencies = [
+ "opcua-client",
+ "opcua-console-logging",
+ "pico-args",
+]
+
+[[package]]
+name = "opcua-event-client"
 version = "0.9.0"
 dependencies = [
  "opcua-client",
