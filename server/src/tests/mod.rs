@@ -6,9 +6,7 @@ use std::{
 use chrono;
 use time;
 
-use opcua_core::{
-    comms::secure_channel::SecureChannel, config::Config, supported_message::SupportedMessage,
-};
+use opcua_core::{config::Config, supported_message::SupportedMessage};
 use opcua_crypto::*;
 use opcua_types::{status_code::StatusCode, *};
 
@@ -38,7 +36,7 @@ fn make_sample_address_space() -> Arc<RwLock<AddressSpace>> {
 }
 
 fn add_sample_vars_to_address_space(address_space: Arc<RwLock<AddressSpace>>) {
-    let mut address_space = trace_write_lock_unwrap!(address_space);
+    let mut address_space = trace_write_lock!(address_space);
 
     let ns = address_space.register_namespace("urn:test").unwrap();
 
@@ -134,8 +132,7 @@ pub fn expired_publish_requests() {
     pr2.request.request_header.timeout_hint = 3000;
 
     // Create session with publish requests
-    let secure_channel: SecureChannel = (SecurityPolicy::None, MessageSecurityMode::None).into();
-    let mut session = Session::new_no_certificate_store(secure_channel);
+    let mut session = Session::new_no_certificate_store();
 
     {
         let publish_request_queue = session.subscriptions_mut().publish_request_queue();

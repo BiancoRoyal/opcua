@@ -1,8 +1,10 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! Contains the implementation of `Method` and `MethodBuilder`.
+
+use std::sync::{Arc, RwLock};
 
 use opcua_types::service_types::{Argument, MethodAttributes};
 
@@ -13,7 +15,7 @@ use crate::{
         node::{Node, NodeBase},
         variable::VariableBuilder,
     },
-    session::Session,
+    session::SessionManager,
 };
 
 node_builder_impl!(MethodBuilder, Method);
@@ -235,12 +237,13 @@ impl Method {
 
     pub fn call(
         &mut self,
-        session: &mut Session,
+        session_id: &NodeId,
+        session_manager: Arc<RwLock<SessionManager>>,
         request: &CallMethodRequest,
     ) -> Result<CallMethodResult, StatusCode> {
         if let Some(ref mut callback) = self.callback {
             // Call the handler
-            callback.call(session, request)
+            callback.call(session_id, session_manager, request)
         } else {
             error!(
                 "Method call to {} has no handler, treating as invalid",

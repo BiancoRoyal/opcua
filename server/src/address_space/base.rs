@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 use opcua_types::{status_code::StatusCode, *};
 
@@ -74,7 +74,7 @@ impl NodeBase for Base {
 impl Node for Base {
     fn get_attribute_max_age(
         &self,
-        timestamps_to_return: TimestampsToReturn,
+        _timestamps_to_return: TimestampsToReturn,
         attribute_id: AttributeId,
         _index_range: NumericRange,
         _data_encoding: &QualifiedName,

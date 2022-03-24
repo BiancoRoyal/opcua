@@ -1,13 +1,13 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},
 };
 
-use crate::trace_lock_unwrap;
+use crate::trace_lock;
 
 /// The `Runtime` is for debugging / diagnostics purposes and tracks which substantial system objects
 /// components are in existence. It can be used to detect if something has shutdown or not.
@@ -27,36 +27,30 @@ impl Default for Runtime {
 
 impl Runtime {
     pub fn components(&self) -> Vec<String> {
-        let running_components = trace_lock_unwrap!(self.running_components);
+        let running_components = trace_lock!(self.running_components);
         running_components.iter().cloned().collect()
     }
 
-    pub fn register_component<T>(&self, name: T)
-    where
-        T: Into<String>,
-    {
-        let key = name.into();
+    pub fn register_component(&self, key: &str) {
         debug!("registering component {}", key);
-        let mut running_components = trace_lock_unwrap!(self.running_components);
-        if running_components.contains(&key) {
+        let mut running_components = trace_lock!(self.running_components);
+        if running_components.contains(key) {
             trace!("Shouldn't be registering component {} more than once", key);
+        } else {
+            running_components.insert(key.to_string());
         }
-        running_components.insert(key);
     }
 
-    pub fn deregister_component<T>(&self, name: T)
-    where
-        T: Into<String>,
-    {
-        let key = name.into();
+    pub fn deregister_component(&self, key: &str) {
         debug!("deregistering component {}", key);
-        let mut running_components = trace_lock_unwrap!(self.running_components);
-        if !running_components.contains(&key) {
+        let mut running_components = trace_lock!(self.running_components);
+        if !running_components.contains(key) {
             trace!(
                 "Shouldn't be deregistering component {} which doesn't exist",
                 key
             );
+        } else {
+            running_components.remove(key);
         }
-        running_components.remove(&key);
     }
 }

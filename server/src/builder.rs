@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 use std::path::PathBuf;
 
@@ -341,7 +341,7 @@ impl ServerBuilder {
     /// Sets the server to automatically trust client certs. This subverts the
     /// authentication during handshake, so only do this if you understand the risks.
     pub fn trust_client_certs(mut self) -> Self {
-        self.config.trust_client_certs = true;
+        self.config.certificate_validation.trust_client_certs = true;
         self
     }
 
@@ -356,6 +356,12 @@ impl ServerBuilder {
     /// thread pool with a worker thread for each CPU core available on the system.
     pub fn single_threaded_executor(mut self) -> Self {
         self.config.performance.single_threaded_executor = true;
+        self
+    }
+
+    /// Configures the server to use a multi-threaded executor.
+    pub fn multi_threaded_executor(mut self) -> Self {
+        self.config.performance.single_threaded_executor = false;
         self
     }
 }

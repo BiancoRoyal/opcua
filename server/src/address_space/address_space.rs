@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! Implementation of `AddressSpace`.
 use std::collections::HashMap;
@@ -15,6 +15,7 @@ use opcua_types::{
     *,
 };
 
+use crate::session::SessionManager;
 use crate::{
     address_space::{
         node::{HasNodeId, NodeType},
@@ -26,7 +27,6 @@ use crate::{
     callbacks, constants,
     diagnostics::ServerDiagnostics,
     historical::HistoryServerCapabilities,
-    session::Session,
     state::ServerState,
 };
 
@@ -249,7 +249,7 @@ impl AddressSpace {
     }
 
     fn set_servers(&mut self, server_state: Arc<RwLock<ServerState>>, now: &DateTime) {
-        let server_state = trace_read_lock_unwrap!(server_state);
+        let server_state = trace_read_lock!(server_state);
         if let Some(ref mut v) = self.find_variable_mut(Server_ServerArray) {
             let _ = v.set_value_direct(
                 Variant::from(&server_state.servers),
@@ -284,15 +284,15 @@ impl AddressSpace {
 
             // Register the server's application uri as a namespace
             {
-                let server_state = trace_read_lock_unwrap!(server_state);
-                let server_config = trace_read_lock_unwrap!(server_state.config);
+                let server_state = trace_read_lock!(server_state);
+                let server_config = trace_read_lock!(server_state.config);
                 let _ = self.register_namespace(&server_config.application_uri);
             }
 
             // ServerCapabilities
             {
-                let server_state = trace_read_lock_unwrap!(server_state);
-                let server_config = trace_read_lock_unwrap!(server_state.config);
+                let server_state = trace_read_lock!(server_state);
+                let server_config = trace_read_lock!(server_state.config);
                 self.set_variable_value(
                     Server_ServerCapabilities_MaxArrayLength,
                     server_config.limits.max_array_length as u32,
@@ -515,7 +515,7 @@ impl AddressSpace {
             // Server_ServerDiagnostics_SubscriptionDiagnosticsArray
             // Server_ServerDiagnostics_EnabledFlag
             {
-                let server_state = trace_read_lock_unwrap!(server_state);
+                let server_state = trace_read_lock!(server_state);
                 self.server_diagnostics = Some(server_state.diagnostics.clone());
                 server_diagnostics_summary!(
                     self,
@@ -606,7 +606,7 @@ impl AddressSpace {
             self.set_variable_getter(
                 Server_ServerStatus_State,
                 move |_, timestamps_to_return, _, _, _, _| {
-                    // let server_state =  trace_read_lock_unwrap!(server_state);
+                    // let server_state =  trace_read_lock!(server_state);
                     let now = DateTime::now();
                     let mut value = DataValue::from(0i32);
                     value.set_timestamps(timestamps_to_return, now, now);
@@ -900,7 +900,7 @@ impl AddressSpace {
                 self.insert(
                     v,
                     Some(&[(
-                        &parent_node_id,
+                        parent_node_id,
                         &ReferenceTypeId::Organizes,
                         ReferenceDirection::Inverse,
                     )]),
@@ -922,7 +922,7 @@ impl AddressSpace {
             });
         }
         // Remove the node
-        let removed_node = self.node_map.remove(&node_id);
+        let removed_node = self.node_map.remove(node_id);
         // Remove references
         let removed_target_references = if delete_target_references {
             self.references.delete_node_references(node_id)
@@ -1152,7 +1152,8 @@ impl AddressSpace {
     pub fn call_method(
         &mut self,
         _server_state: &ServerState,
-        session: &mut Session,
+        session_id: &NodeId,
+        session_manager: Arc<RwLock<SessionManager>>,
         request: &CallMethodRequest,
     ) -> Result<CallMethodResult, StatusCode> {
         let (object_id, method_id) = (&request.object_id, &request.method_id);
@@ -1178,7 +1179,7 @@ impl AddressSpace {
         } else if let Some(method) = self.find_mut(method_id) {
             // TODO check security - session / user may not have permission to call methods
             match method {
-                NodeType::Method(method) => method.call(session, request),
+                NodeType::Method(method) => method.call(session_id, session_manager, request),
                 _ => Err(StatusCode::BadMethodInvalid),
             }
         } else {

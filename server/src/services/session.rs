@@ -1,9 +1,10 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 use std::sync::{Arc, RwLock};
 
+use opcua_core::comms::secure_channel::SecureChannel;
 use opcua_core::supported_message::SupportedMessage;
 use opcua_crypto::{self as crypto, random, CertificateStore, SecurityPolicy};
 use opcua_types::{status_code::StatusCode, *};
@@ -13,7 +14,7 @@ use crate::{
     constants,
     identity_token::IdentityToken,
     services::{audit, Service},
-    session::Session,
+    session::{Session, SessionManager},
     state::ServerState,
 };
 
@@ -33,14 +34,14 @@ impl SessionService {
 
     pub fn create_session(
         &self,
-        certificate_store: &CertificateStore,
+        secure_channel: Arc<RwLock<SecureChannel>>,
+        certificate_store: Arc<RwLock<CertificateStore>>,
         server_state: Arc<RwLock<ServerState>>,
-        session: Arc<RwLock<Session>>,
         address_space: Arc<RwLock<AddressSpace>>,
         request: &CreateSessionRequest,
-    ) -> SupportedMessage {
-        let server_state = trace_write_lock_unwrap!(server_state);
-        let mut session = trace_write_lock_unwrap!(session);
+    ) -> (Option<Session>, SupportedMessage) {
+        let mut session = Session::new(server_state.clone());
+        let server_state = trace_write_lock!(server_state);
 
         debug!("Create session request {:?}", request);
 
@@ -65,9 +66,12 @@ impl SessionService {
         };
         if service_result.is_bad() {
             // Rejected
-            let mut diagnostics = trace_write_lock_unwrap!(server_state.diagnostics);
+            let mut diagnostics = trace_write_lock!(server_state.diagnostics);
             diagnostics.on_rejected_session();
-            self.service_fault(&request.request_header, service_result)
+            (
+                None,
+                self.service_fault(&request.request_header, service_result),
+            )
         } else {
             let endpoints = endpoints.unwrap();
 
@@ -77,11 +81,11 @@ impl SessionService {
 
             // Check the client's certificate for validity and acceptance
             let security_policy = {
-                let secure_channel = session.secure_channel();
-                let secure_channel = trace_read_lock_unwrap!(secure_channel);
+                let secure_channel = trace_read_lock!(secure_channel);
                 secure_channel.security_policy()
             };
             let service_result = if security_policy != SecurityPolicy::None {
+                let certificate_store = trace_read_lock!(certificate_store);
                 let result = if let Some(ref client_certificate) = client_certificate {
                     certificate_store.validate_or_reject_application_instance_cert(
                         client_certificate,
@@ -103,7 +107,7 @@ impl SessionService {
                     );
 
                     // Rejected for security reasons
-                    let mut diagnostics = trace_write_lock_unwrap!(server_state.diagnostics);
+                    let mut diagnostics = trace_write_lock!(server_state.diagnostics);
                     diagnostics.on_rejected_security_session();
                 }
                 result
@@ -111,16 +115,21 @@ impl SessionService {
                 StatusCode::Good
             };
 
+            let secure_channel = trace_read_lock!(secure_channel);
             if service_result.is_bad() {
                 audit::log_create_session(
                     &server_state,
+                    &secure_channel,
                     &session,
                     address_space,
                     false,
                     0f64,
                     request,
                 );
-                self.service_fault(&request.request_header, service_result)
+                (
+                    None,
+                    self.service_fault(&request.request_header, service_result),
+                )
             } else {
                 let session_timeout =
                     if request.requested_session_timeout > constants::MAX_SESSION_TIMEOUT {
@@ -159,6 +168,7 @@ impl SessionService {
 
                 audit::log_create_session(
                     &server_state,
+                    &secure_channel,
                     &session,
                     address_space.clone(),
                     true,
@@ -169,7 +179,7 @@ impl SessionService {
                 // Create a session id in the address space
                 session.register_session(address_space);
 
-                CreateSessionResponse {
+                let response = CreateSessionResponse {
                     response_header: ResponseHeader::new_good(&request.request_header),
                     session_id: session.session_id().clone(),
                     authentication_token,
@@ -181,25 +191,27 @@ impl SessionService {
                     server_signature,
                     max_request_message_size,
                 }
-                .into()
+                .into();
+
+                (Some(session), response)
             }
         }
     }
 
     pub fn activate_session(
         &self,
+        secure_channel: Arc<RwLock<SecureChannel>>,
         server_state: Arc<RwLock<ServerState>>,
         session: Arc<RwLock<Session>>,
         address_space: Arc<RwLock<AddressSpace>>,
         request: &ActivateSessionRequest,
     ) -> SupportedMessage {
-        let server_state = trace_write_lock_unwrap!(server_state);
-        let mut session = trace_write_lock_unwrap!(session);
+        let server_state = trace_write_lock!(server_state);
+        let mut session = trace_write_lock!(session);
         let endpoint_url = session.endpoint_url().as_ref();
 
         let (security_policy, security_mode) = {
-            let secure_channel = session.secure_channel();
-            let secure_channel = trace_read_lock_unwrap!(secure_channel);
+            let secure_channel = trace_read_lock!(secure_channel);
             (
                 secure_channel.security_policy(),
                 secure_channel.security_mode(),
@@ -207,7 +219,6 @@ impl SessionService {
         };
 
         let server_nonce = security_policy.random_nonce();
-
         let mut service_result =
             if !server_state.endpoint_exists(endpoint_url, security_policy, security_mode) {
                 // Need an endpoint
@@ -219,7 +230,12 @@ impl SessionService {
             } else if security_policy != SecurityPolicy::None {
                 // Crypto see 5.6.3.1 verify the caller is the same caller as create_session by validating
                 // signature supplied by the client during the create.
-                Self::verify_client_signature(&server_state, &session, &request.client_signature)
+                Self::verify_client_signature(
+                    security_policy,
+                    &server_state,
+                    &session,
+                    &request.client_signature,
+                )
             } else {
                 // No cert checks for no security
                 StatusCode::Good
@@ -250,7 +266,17 @@ impl SessionService {
 
             let diagnostic_infos = None;
 
-            audit::log_activate_session(&server_state, &session, address_space, true, request);
+            {
+                let secure_channel = trace_read_lock!(secure_channel);
+                audit::log_activate_session(
+                    &secure_channel,
+                    &server_state,
+                    &session,
+                    address_space,
+                    true,
+                    request,
+                );
+            }
 
             ActivateSessionResponse {
                 response_header: ResponseHeader::new_good(&request.request_header),
@@ -267,23 +293,37 @@ impl SessionService {
 
     pub fn close_session(
         &self,
+        session_manager: Arc<RwLock<SessionManager>>,
         server_state: Arc<RwLock<ServerState>>,
-        session: Arc<RwLock<Session>>,
         address_space: Arc<RwLock<AddressSpace>>,
         request: &CloseSessionRequest,
     ) -> SupportedMessage {
-        let server_state = trace_write_lock_unwrap!(server_state);
-        let mut session = trace_write_lock_unwrap!(session);
-        session.set_authentication_token(NodeId::null());
-        session.set_user_identity(IdentityToken::None);
-        session.set_activated(false);
+        let server_state = trace_write_lock!(server_state);
+        let session = {
+            let session_manager = trace_read_lock!(session_manager);
+            session_manager.find_session_by_token(&request.request_header.authentication_token)
+        };
+        if let Some(session) = session {
+            {
+                let mut session = trace_write_lock!(session);
+                session.set_authentication_token(NodeId::null());
+                session.set_user_identity(IdentityToken::None);
+                session.set_activated(false);
+                audit::log_close_session(&server_state, &session, address_space, true, request);
+            }
 
-        audit::log_close_session(&server_state, &session, address_space, true, request);
+            {
+                let mut session_manager = trace_write_lock!(session_manager);
+                session_manager.deregister_session(session);
+            }
 
-        CloseSessionResponse {
-            response_header: ResponseHeader::new_good(&request.request_header),
+            CloseSessionResponse {
+                response_header: ResponseHeader::new_good(&request.request_header),
+            }
+            .into()
+        } else {
+            self.service_fault(&request.request_header, StatusCode::BadSessionIdInvalid)
         }
-        .into()
     }
 
     pub fn cancel(
@@ -303,17 +343,13 @@ impl SessionService {
     /// Verifies that the supplied client signature was produced by the session's client certificate
     /// from the server's certificate and nonce.
     fn verify_client_signature(
+        security_policy: SecurityPolicy,
         server_state: &ServerState,
         session: &Session,
         client_signature: &SignatureData,
     ) -> StatusCode {
         if let Some(ref client_certificate) = session.client_certificate() {
             if let Some(ref server_certificate) = server_state.server_certificate {
-                let security_policy = {
-                    let secure_channel = session.secure_channel();
-                    let secure_channel = trace_read_lock_unwrap!(secure_channel);
-                    secure_channel.security_policy()
-                };
                 crypto::verify_signature_data(
                     client_signature,
                     security_policy,

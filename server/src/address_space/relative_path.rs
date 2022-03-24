@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 use std::collections::HashSet;
 
@@ -32,7 +32,7 @@ pub(crate) fn find_node_from_browse_path<'a>(
         for browse_name in browse_path {
             if let Some(child_nodes) = address_space.find_hierarchical_references(&parent_node_id) {
                 let found_node_id = child_nodes.iter().find(|node_id| {
-                    if let Some(node) = address_space.find_node(&node_id) {
+                    if let Some(node) = address_space.find_node(node_id) {
                         if node.as_node().browse_name() == *browse_name {
                             // Check that the node is an Object or Variable
                             matches!(node, NodeType::Object(_) | NodeType::Variable(_))
@@ -64,8 +64,22 @@ pub(crate) fn find_node_from_browse_path<'a>(
     }
 }
 
+/// Given a path as a string, find all the nodes that match against it. Note this function
+/// uses a default path resolver based on common browse names. If you need something else use
+/// `find_nodes_relative_path()` after you have created a relative path.
+pub fn find_nodes_relative_path_simple(
+    address_space: &AddressSpace,
+    node_id: &NodeId,
+    relative_path: &str,
+) -> Result<Vec<NodeId>, StatusCode> {
+    let relative_path =
+        RelativePath::from_str(relative_path, &RelativePathElement::default_node_resolver)
+            .map_err(|_| StatusCode::BadUnexpectedError)?;
+    find_nodes_relative_path(address_space, node_id, &relative_path)
+}
+
 /// Given a `RelativePath`, find all the nodes that match against it.
-pub(crate) fn find_nodes_relative_path(
+pub fn find_nodes_relative_path(
     address_space: &AddressSpace,
     node_id: &NodeId,
     relative_path: &RelativePath,

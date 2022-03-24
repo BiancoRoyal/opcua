@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! Contains definitions of the simple OPC UA scalar types.
 use std::io::{Read, Write};
@@ -63,7 +63,7 @@ impl BinaryEncoder<u8> for u8 {
     }
 
     fn decode<S: Read>(stream: &mut S, _: &DecodingOptions) -> EncodingResult<Self> {
-        Ok(read_u8(stream)?)
+        read_u8(stream)
     }
 }
 

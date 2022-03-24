@@ -1,6 +1,10 @@
+use std::sync::{Arc, RwLock};
+
 use crate::{
     address_space::{
-        references::Reference, relative_path::find_node_from_browse_path, EventNotifier,
+        references::Reference,
+        relative_path::{find_node_from_browse_path, find_nodes_relative_path_simple},
+        EventNotifier,
     },
     callbacks,
     prelude::*,
@@ -144,7 +148,7 @@ fn object_attributes() {
 #[test]
 fn find_node_by_id() {
     let address_space = make_sample_address_space();
-    let mut address_space = trace_write_lock_unwrap!(address_space);
+    let mut address_space = trace_write_lock!(address_space);
     let ns = address_space.register_namespace("urn:test").unwrap();
 
     assert!(!address_space.node_exists(&NodeId::null()));
@@ -167,7 +171,7 @@ fn dump_references(references: &Vec<Reference>) {
 #[test]
 fn find_references_by_direction() {
     let address_space = make_sample_address_space();
-    let address_space = trace_read_lock_unwrap!(address_space);
+    let address_space = trace_read_lock!(address_space);
 
     let (references, _inverse_ref_idx) = address_space
         .find_references_by_direction::<ReferenceTypeId>(
@@ -221,7 +225,7 @@ fn find_references_by_direction() {
 #[test]
 fn find_references() {
     let address_space = make_sample_address_space();
-    let address_space = trace_read_lock_unwrap!(address_space);
+    let address_space = trace_read_lock!(address_space);
 
     let references = address_space.find_references(
         &NodeId::root_folder_id(),
@@ -259,7 +263,7 @@ fn find_references() {
 #[test]
 fn find_inverse_references() {
     let address_space = make_sample_address_space();
-    let address_space = trace_read_lock_unwrap!(address_space);
+    let address_space = trace_read_lock!(address_space);
 
     //println!("{:#?}", address_space);
     let references = address_space.find_inverse_references(
@@ -280,7 +284,7 @@ fn find_inverse_references() {
 #[test]
 fn find_reference_subtypes() {
     let address_space = make_sample_address_space();
-    let address_space = trace_read_lock_unwrap!(address_space);
+    let address_space = trace_read_lock!(address_space);
 
     let references = address_space.references();
     let reference_types = vec![
@@ -469,7 +473,7 @@ fn multi_dimension_array_as_variable() {
     let values = (0..100)
         .map(|i| Variant::Int32(i))
         .collect::<Vec<Variant>>();
-    let mda = Array::new_multi(VariantTypeId::Int32, values, vec![10u32, 10u32]);
+    let mda = Array::new_multi(VariantTypeId::Int32, values, vec![10u32, 10u32]).unwrap();
     assert!(mda.is_valid());
 
     // Get the variable node back from the address space, ensure that the ValueRank and ArrayDimensions are correct
@@ -485,7 +489,7 @@ fn multi_dimension_array_as_variable() {
 #[test]
 fn browse_nodes() {
     let address_space = make_sample_address_space();
-    let address_space = trace_read_lock_unwrap!(address_space);
+    let address_space = trace_read_lock!(address_space);
 
     // Test that a node can be found
     let object_id = ObjectId::RootFolder.into();
@@ -505,6 +509,25 @@ fn browse_nodes() {
     );
     assert!(result.is_err());
     assert_eq!(result.unwrap_err(), StatusCode::BadNotFound);
+}
+
+#[test]
+fn find_nodes_relative_path() {
+    let address_space = make_sample_address_space();
+    let address_space = trace_read_lock!(address_space);
+
+    // Given some paths, find the nodes
+    let parent_node = ObjectId::RootFolder.into();
+
+    let relative_path = "/Objects/Server.ServerStatus.BuildInfo.ProductName";
+
+    let results =
+        find_nodes_relative_path_simple(&address_space, &parent_node, relative_path).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0],
+        VariableId::Server_ServerStatus_BuildInfo_ProductName.into()
+    );
 }
 
 #[test]
@@ -708,7 +731,8 @@ struct HelloWorld;
 impl callbacks::Method for HelloWorld {
     fn call(
         &mut self,
-        _session: &mut Session,
+        _session_id: &NodeId,
+        _session_map: Arc<RwLock<SessionManager>>,
         _request: &CallMethodRequest,
     ) -> Result<CallMethodResult, StatusCode> {
         Ok(CallMethodResult {

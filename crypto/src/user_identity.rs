@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! Functions related to encrypting / decrypting passwords in a UserNameIdentityToken.
 //!
@@ -165,7 +165,7 @@ pub fn legacy_password_decrypt(
         let src = secret.value.as_ref().unwrap();
         let mut dst = vec![0u8; src.len()];
         let actual_size = server_key
-            .private_decrypt(&src, &mut dst, padding)
+            .private_decrypt(src, &mut dst, padding)
             .map_err(|_| StatusCode::BadEncodingError)?;
 
         let mut dst = Cursor::new(dst);

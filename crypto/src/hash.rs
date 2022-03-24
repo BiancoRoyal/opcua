@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! Hashing functions used for producing and verifying digital signatures
 
@@ -102,7 +102,7 @@ pub fn verify_hmac_sha1(key: &[u8], data: &[u8], signature: &[u8]) -> bool {
         } else {
             trace!("Original signature = {:?}", signature);
             trace!("Calculated signature = {:?}", tmp_signature);
-            signature == &tmp_signature[..]
+            openssl::memcmp::eq(signature, &tmp_signature[..])
         }
     }
 }
@@ -128,7 +128,7 @@ pub fn verify_hmac_sha256(key: &[u8], data: &[u8], signature: &[u8]) -> bool {
         if hmac_sha256(key, data, &mut tmp_signature).is_err() {
             false
         } else {
-            signature == &tmp_signature[..]
+            openssl::memcmp::eq(signature, &tmp_signature[..])
         }
     }
 }

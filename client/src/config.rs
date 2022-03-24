@@ -1,16 +1,21 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! Client configuration data.
 
-use std::{self, collections::BTreeMap, path::PathBuf, str::FromStr};
+use std::{
+    self,
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 use opcua_core::config::Config;
 use opcua_crypto::SecurityPolicy;
 use opcua_types::{ApplicationType, MessageSecurityMode, UAString};
 
-use crate::session_retry::SessionRetryPolicy;
+use crate::session_retry_policy::SessionRetryPolicy;
 
 pub const ANONYMOUS_USER_TOKEN_ID: &str = "ANONYMOUS";
 
@@ -43,7 +48,7 @@ impl ClientUserToken {
     }
 
     /// Constructs a client token which holds a username and paths to X509 certificate and private key.
-    pub fn x509<S>(user: S, cert_path: &PathBuf, private_key_path: &PathBuf) -> Self
+    pub fn x509<S>(user: S, cert_path: &Path, private_key_path: &Path) -> Self
     where
         S: Into<String>,
     {
@@ -129,6 +134,18 @@ impl ClientEndpoint {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct DecodingOptions {
+    /// Maximum size of a message chunk in bytes. 0 means no limit
+    pub max_chunk_count: usize,
+    /// Maximum length in bytes (not chars!) of a string. 0 actually means 0, i.e. no string permitted
+    pub max_string_length: usize,
+    /// Maximum length in bytes of a byte string. 0 actually means 0, i.e. no byte string permitted
+    pub max_byte_string_length: usize,
+    /// Maximum number of array elements. 0 actually means 0, i.e. no array permitted
+    pub max_array_length: usize,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct Performance {
     /// Ignore clock skew allows the client to make a successful connection to the server, even
     /// when the client and server clocks are out of sync.
@@ -170,6 +187,8 @@ pub struct ClientConfig {
     pub user_tokens: BTreeMap<String, ClientUserToken>,
     /// List of end points
     pub endpoints: BTreeMap<String, ClientEndpoint>,
+    /// Decoding options used for serialization / deserialization
+    pub decoding_options: DecodingOptions,
     /// Max retry limit -1, 0 or number
     pub session_retry_limit: i32,
     /// Retry interval in milliseconds
@@ -291,6 +310,8 @@ impl ClientConfig {
         let mut pki_dir = std::env::current_dir().unwrap();
         pki_dir.push(Self::PKI_DIR);
 
+        let decoding_options = opcua_types::DecodingOptions::default();
+
         ClientConfig {
             application_name: application_name.into(),
             application_uri: application_uri.into(),
@@ -308,9 +329,15 @@ impl ClientConfig {
             session_retry_limit: SessionRetryPolicy::DEFAULT_RETRY_LIMIT as i32,
             session_retry_interval: SessionRetryPolicy::DEFAULT_RETRY_INTERVAL_MS,
             session_timeout: 0,
+            decoding_options: DecodingOptions {
+                max_array_length: decoding_options.max_array_length,
+                max_string_length: decoding_options.max_string_length,
+                max_byte_string_length: decoding_options.max_byte_string_length,
+                max_chunk_count: decoding_options.max_chunk_count,
+            },
             performance: Performance {
                 ignore_clock_skew: false,
-                single_threaded_executor: false,
+                single_threaded_executor: true,
             },
             session_name: "Rust OPC UA Client".into(),
         }

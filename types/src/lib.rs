@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! The OPC UA Types module contains data types and enumerations for OPC UA.
 //!
@@ -226,7 +226,7 @@ pub use crate::{
     argument::*, array::*, attribute::*, basic_types::*, byte_string::*, data_types::*,
     data_value::*, date_time::*, diagnostic_info::*, encoding::*, extension_object::*, guid::*,
     localized_text::*, node_id::*, node_ids::*, numeric_range::*, operand::*, qualified_name::*,
-    request_header::*, response_header::*, service_types::*, string::*, variant::*,
+    request_header::*, response_header::*, service_types::*, status_code::*, string::*, variant::*,
 };
 
 #[cfg(test)]

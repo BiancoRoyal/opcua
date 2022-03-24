@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 use std::collections::{BTreeSet, VecDeque};
 use std::result::Result;
@@ -312,7 +312,7 @@ impl MonitoredItem {
                         &object_id,
                         filter,
                         address_space,
-                        &happened_since,
+                        happened_since,
                         self.client_handle,
                     ) {
                         events
@@ -559,11 +559,9 @@ impl MonitoredItem {
 
     /// Takes the requested queue size and ensures it is within the range supported by the server
     fn sanitize_queue_size(server_state: &ServerState, requested_queue_size: usize) -> usize {
-        if requested_queue_size == 0 {
+        if requested_queue_size == 0 || requested_queue_size == 1 {
             // For data monitored items 0 -> 1
-            1
-        // Future - for event monitored items, queue size should be the default queue size for event notifications
-        } else if requested_queue_size == 1 {
+            // Future - for event monitored items, queue size should be the default queue size for event notifications
             1
         // Future - for event monitored items, the minimum queue size the server requires for event notifications
         } else if requested_queue_size > server_state.max_monitored_item_queue_size {

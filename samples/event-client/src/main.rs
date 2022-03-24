@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! This OPC UA client will subscribe to events and print them out when it receives them
 //!
@@ -103,7 +103,7 @@ fn subscribe_to_events(
     event_source: &str,
     event_fields: &str,
 ) -> Result<(), StatusCode> {
-    let mut session = session.write().unwrap();
+    let session = session.read().unwrap();
 
     let event_fields: Vec<String> = event_fields.split(',').map(|s| s.into()).collect();
 

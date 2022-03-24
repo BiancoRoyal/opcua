@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! Callbacks that a server implementation may register with the library
 
@@ -12,7 +12,7 @@ use opcua_types::{
     AttributeId, DataValue, NodeId, NumericRange, QualifiedName,
 };
 
-use crate::session::Session;
+use crate::session::{Session, SessionManager};
 
 /// An attribute getter trait is used to obtain the data value associated with the particular attribute id
 /// This allows server implementations to supply a value on demand, usually in response to a polling action
@@ -93,7 +93,8 @@ pub trait Method {
     /// be invoked to handle the call.
     fn call(
         &mut self,
-        session: &mut Session,
+        session_id: &NodeId,
+        session_manager: Arc<RwLock<SessionManager>>,
         request: &CallMethodRequest,
     ) -> Result<CallMethodResult, StatusCode>;
 }

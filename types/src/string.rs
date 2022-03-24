@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! Contains the implementation of `UAString`.
 
@@ -57,7 +57,7 @@ impl BinaryEncoder<UAString> for UAString {
             let mut size: usize = 0;
             size += write_i32(stream, value.len() as i32)?;
             let buf = value.as_bytes();
-            size += process_encode_io_result(stream.write(&buf))?;
+            size += process_encode_io_result(stream.write(buf))?;
             assert_eq!(size, self.byte_len());
             Ok(size)
         }

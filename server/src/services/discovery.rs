@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 use std::sync::{Arc, RwLock};
 
@@ -29,7 +29,7 @@ impl DiscoveryService {
         server_state: Arc<RwLock<ServerState>>,
         request: &GetEndpointsRequest,
     ) -> SupportedMessage {
-        let server_state = trace_read_lock_unwrap!(server_state);
+        let server_state = trace_read_lock!(server_state);
 
         // TODO some of the arguments in the request are ignored
         //  localeIds - list of locales to use for human readable strings (in the endpoint descriptions)
@@ -65,10 +65,10 @@ impl DiscoveryService {
         server_state: Arc<RwLock<ServerState>>,
         request: &FindServersRequest,
     ) -> SupportedMessage {
-        let server_state = trace_read_lock_unwrap!(server_state);
+        let server_state = trace_read_lock!(server_state);
 
         let application_description = {
-            let config = trace_read_lock_unwrap!(server_state.config);
+            let config = trace_read_lock!(server_state.config);
             config.application_description()
         };
 
@@ -84,12 +84,8 @@ impl DiscoveryService {
         if let Some(ref server_uris) = request.server_uris {
             if !server_uris.is_empty() {
                 // Filter the servers down
-                servers.retain(|server| {
-                    server_uris
-                        .iter()
-                        .find(|uri| *uri == &server.application_uri)
-                        .is_some()
-                });
+                servers
+                    .retain(|server| server_uris.iter().any(|uri| *uri == server.application_uri));
             }
         }
 

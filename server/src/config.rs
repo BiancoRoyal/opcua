@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! Provides configuration settings for the server including serialization and deserialization from file.
 use std::collections::{BTreeMap, BTreeSet};
@@ -161,6 +161,15 @@ impl Default for Limits {
             min_publishing_interval: constants::MIN_PUBLISHING_INTERVAL,
         }
     }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct CertificateValidation {
+    /// Auto trusts client certificates. For testing/samples only unless you're sure what you're
+    /// doing.
+    pub trust_client_certs: bool,
+    /// Check the valid from/to fields of a certificate
+    pub check_time: bool,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
@@ -505,9 +514,8 @@ pub struct ServerConfig {
     pub certificate_path: Option<PathBuf>,
     /// Path to a custom private key, to be used instead of the default private key
     pub private_key_path: Option<PathBuf>,
-    /// Auto trusts client certificates. For testing/samples only unless you're sure what you're
-    /// doing.
-    pub trust_client_certs: bool,
+    /// Checks the certificate's time validity
+    pub certificate_validation: CertificateValidation,
     /// PKI folder, either absolute or relative to executable
     pub pki_dir: PathBuf,
     /// Url to a discovery server - adding this string causes the server to assume you wish to
@@ -548,7 +556,7 @@ impl Config for ServerConfig {
             valid = false;
         }
         for (id, endpoint) in &self.endpoints {
-            if !endpoint.is_valid(&id, &self.user_tokens) {
+            if !endpoint.is_valid(id, &self.user_tokens) {
                 valid = false;
             }
         }
@@ -558,7 +566,7 @@ impl Config for ServerConfig {
             }
         }
         for (id, user_token) in &self.user_tokens {
-            if !user_token.is_valid(&id) {
+            if !user_token.is_valid(id) {
                 valid = false;
             }
         }
@@ -617,7 +625,10 @@ impl Default for ServerConfig {
             certificate_path: None,
             private_key_path: None,
             pki_dir,
-            trust_client_certs: false,
+            certificate_validation: CertificateValidation {
+                trust_client_certs: false,
+                check_time: true,
+            },
             discovery_server_url: None,
             tcp_config: TcpConfig {
                 host: "127.0.0.1".to_string(),
@@ -669,7 +680,10 @@ impl ServerConfig {
             create_sample_keypair: false,
             certificate_path: None,
             private_key_path: None,
-            trust_client_certs: false,
+            certificate_validation: CertificateValidation {
+                trust_client_certs: false,
+                check_time: true,
+            },
             pki_dir,
             discovery_server_url,
             tcp_config: TcpConfig {

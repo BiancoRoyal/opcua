@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! Contains the implementation of `DataValue`.
 
@@ -386,7 +386,7 @@ impl DataValue {
         DataValue {
             value: Some(value.into()),
             status: Some(StatusCode::Good),
-            source_timestamp: Some(now.clone()),
+            source_timestamp: Some(now),
             source_picoseconds: Some(0),
             server_timestamp: Some(now),
             server_picoseconds: Some(0),
@@ -415,9 +415,9 @@ impl DataValue {
         V: Into<Variant>,
     {
         self.value = Some(value.into());
-        self.source_timestamp = Some(source_timestamp.clone());
+        self.source_timestamp = Some(*source_timestamp);
         self.source_picoseconds = Some(0);
-        self.server_timestamp = Some(server_timestamp.clone());
+        self.server_timestamp = Some(*server_timestamp);
         self.server_picoseconds = Some(0);
     }
 

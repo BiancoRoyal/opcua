@@ -1,14 +1,14 @@
 // OPCUA for Rust
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 #[macro_use]
 extern crate serde_derive;
 
 use std::{
     str::FromStr,
-    sync::{mpsc, Arc, RwLock},
+    sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
 
@@ -18,7 +18,6 @@ use actix_web::{
     server::HttpServer,
     ws, App, Error, HttpRequest, HttpResponse,
 };
-use serde_json;
 
 use opcua_client::prelude::*;
 
@@ -94,7 +93,7 @@ struct OPCUASession {
     /// The OPC UA session
     session: Option<Arc<RwLock<Session>>>,
     /// A sender that the session can use to terminate the corresponding OPC UA session
-    session_tx: Option<mpsc::Sender<SessionCommand>>,
+    session_tx: Option<tokio::sync::oneshot::Sender<SessionCommand>>,
 }
 
 impl Actor for OPCUASession {
@@ -148,18 +147,17 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for OPCUASession {
             }
             ws::Message::Text(msg) => {
                 let msg = msg.trim();
-                if msg.starts_with("connect ") {
-                    self.connect(ctx, &msg[8..]);
+                if let Some(msg) = msg.strip_prefix("connect ") {
+                    self.connect(ctx, msg);
                 } else if msg.eq("disconnect") {
                     self.disconnect(ctx);
-                } else if msg.starts_with("subscribe ") {
+                } else if let Some(msg) = msg.strip_prefix("subscribe ") {
                     // Node ids are comma separated
-                    let node_ids: Vec<String> =
-                        msg[10..].split(',').map(|s| s.to_string()).collect();
+                    let node_ids: Vec<String> = msg.split(',').map(|s| s.to_string()).collect();
                     self.subscribe(ctx, node_ids);
                     println!("subscription complete");
-                } else if msg.starts_with("add_event ") {
-                    let args: Vec<String> = msg[10..].split(',').map(|s| s.to_string()).collect();
+                } else if let Some(msg) = msg.strip_prefix("add_event ") {
+                    let args: Vec<String> = msg.split(',').map(|s| s.to_string()).collect();
                     self.add_event(ctx, args);
                     println!("add event complete");
                 }
@@ -238,16 +236,15 @@ impl OPCUASession {
 
     fn disconnect(&mut self, _ctx: &mut <Self as Actor>::Context) {
         if let Some(ref mut session) = self.session {
-            let mut session = session.write().unwrap();
+            let session = session.read().unwrap();
             if session.is_connected() {
                 session.disconnect();
             }
         }
-        if let Some(ref tx) = self.session_tx {
+        if let Some(tx) = self.session_tx.take() {
             let _ = tx.send(SessionCommand::Stop);
         }
         self.session = None;
-        self.session_tx = None;
     }
 
     fn lhs_operand(op: &str) -> Operand {
@@ -291,7 +288,7 @@ impl OPCUASession {
         let select_criteria = args.get(2).unwrap();
 
         if let Some(ref mut session) = self.session {
-            let mut session = session.write().unwrap();
+            let session = session.read().unwrap();
 
             let event_node_id = NodeId::from_str(event_node_id);
             if event_node_id.is_err() {
@@ -401,7 +398,7 @@ impl OPCUASession {
             // Create a subscription
             println!("Creating subscription");
 
-            let mut session = session.write().unwrap();
+            let session = session.read().unwrap();
             // Creates our subscription
             let addr_for_datachange = ctx.address();
 

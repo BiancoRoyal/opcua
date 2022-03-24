@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! Contains the implementation of `NodeId` and `ExpandedNodeId`.
 
@@ -592,8 +592,8 @@ impl fmt::Display for ExpandedNodeId {
         } else {
             // The % and ; chars have to be escaped out in the uri
             let namespace_uri = String::from(self.namespace_uri.as_ref())
-                .replace("%", "%25")
-                .replace(";", "%3b");
+                .replace('%', "%25")
+                .replace(';', "%3b");
             // svr=<serverindex>;nsu=<uri>;<type>=<value>
             write!(
                 f,

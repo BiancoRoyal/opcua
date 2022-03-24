@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! Client setup and session creation.
 
@@ -9,6 +9,8 @@ use std::{
     str::FromStr,
     sync::{Arc, RwLock},
 };
+
+use chrono::Duration;
 
 use opcua_core::{
     comms::url::{
@@ -21,13 +23,16 @@ use opcua_crypto::{CertificateStore, SecurityPolicy};
 use opcua_types::{
     service_types::{ApplicationDescription, EndpointDescription, RegisteredServer},
     status_code::StatusCode,
-    MessageSecurityMode,
+    DecodingOptions, MessageSecurityMode,
 };
 
 use crate::{
     config::{ClientConfig, ClientEndpoint, ANONYMOUS_USER_TOKEN_ID},
-    session::{Session, SessionInfo},
-    session_retry::SessionRetryPolicy,
+    session::{
+        services::*,
+        session::{Session, SessionInfo},
+    },
+    session_retry_policy::SessionRetryPolicy,
 };
 
 #[derive(Debug, Clone)]
@@ -73,7 +78,7 @@ impl Drop for Client {
         // TODO - this causes panics on unwrap - have to figure the reason out
         //        for session in self.sessions.iter_mut() {
         //            // Disconnect
-        //            let mut session = trace_write_lock_unwrap!(session.session);
+        //            let mut session = trace_write_lock!(session.session);
         //            if session.is_connected() {
         //                session.disconnect()
         //            }
@@ -132,10 +137,10 @@ impl Client {
         }
 
         // Clients may choose to skip additional server certificate validations
-        certificate_store.skip_verify_certs = !config.verify_server_certs;
+        certificate_store.set_skip_verify_certs(!config.verify_server_certs);
 
         // Clients may choose to auto trust servers to save some messing around with rejected certs
-        certificate_store.trust_unknown_certs = config.trust_server_certs;
+        certificate_store.set_trust_unknown_certs(config.trust_server_certs);
 
         let session_timeout = config.session_timeout as f64;
 
@@ -214,12 +219,10 @@ impl Client {
         {
             // Connect to the server
             let mut session = session.write().unwrap();
-            if let Err(result) = session.connect_and_activate() {
-                error!(
-                    "Got an error while creating the default session - {}",
-                    result
-                );
-            }
+            session.connect_and_activate().map_err(|err| {
+                error!("Got an error while creating the default session - {}", err);
+                err
+            })?;
         }
 
         Ok(session)
@@ -282,12 +285,10 @@ impl Client {
         {
             // Connect to the server
             let mut session = session.write().unwrap();
-            if let Err(result) = session.connect_and_activate() {
-                error!(
-                    "Got an error while creating the default session - {}",
-                    result
-                );
-            }
+            session.connect_and_activate().map_err(|err| {
+                error!("Got an error while creating the default session - {}", err);
+                err
+            })?;
         }
 
         Ok(session)
@@ -391,6 +392,7 @@ impl Client {
                 self.certificate_store.clone(),
                 session_info,
                 self.session_retry_policy.clone(),
+                self.decoding_options(),
                 self.config.performance.ignore_clock_skew,
                 self.config.performance.single_threaded_executor,
             )));
@@ -418,6 +420,17 @@ impl Client {
         } else {
             error!("There is no default endpoint, so cannot get endpoints");
             Err(StatusCode::BadUnexpectedError)
+        }
+    }
+
+    fn decoding_options(&self) -> DecodingOptions {
+        let decoding_options = &self.config.decoding_options;
+        DecodingOptions {
+            max_chunk_count: decoding_options.max_chunk_count,
+            max_string_length: decoding_options.max_string_length,
+            max_byte_string_length: decoding_options.max_byte_string_length,
+            max_array_length: decoding_options.max_array_length,
+            client_offset: Duration::zero(),
         }
     }
 
@@ -461,12 +474,13 @@ impl Client {
                 user_identity_token: IdentityToken::Anonymous,
                 preferred_locales,
             };
-            let mut session = Session::new(
+            let session = Session::new(
                 self.application_description(),
                 self.config.session_name.clone(),
                 self.certificate_store.clone(),
                 session_info,
                 self.session_retry_policy.clone(),
+                self.decoding_options(),
                 self.config.performance.ignore_clock_skew,
                 self.config.performance.single_threaded_executor,
             );
@@ -494,7 +508,7 @@ impl Client {
         let endpoint = EndpointDescription::from(discovery_endpoint_url.as_ref());
         let session = self.new_session_from_info(endpoint);
         if let Ok(session) = session {
-            let mut session = trace_write_lock_unwrap!(session);
+            let session = trace_read_lock!(session);
             // Connect & activate the session.
             let connected = session.connect();
             if connected.is_ok() {
@@ -575,7 +589,7 @@ impl Client {
                     );
                     let session = self.new_session_from_info(endpoint.clone());
                     if let Ok(session) = session {
-                        let mut session = trace_write_lock_unwrap!(session);
+                        let session = trace_read_lock!(session);
                         match session.connect() {
                             Ok(_) => {
                                 // Register with the server
@@ -632,14 +646,9 @@ impl Client {
                     password.clone(),
                 ))
             } else if let Some(ref cert_path) = token.cert_path {
-                if let Some(ref private_key_path) = token.private_key_path {
-                    Some(IdentityToken::X509(
-                        PathBuf::from(cert_path),
-                        PathBuf::from(private_key_path),
-                    ))
-                } else {
-                    None
-                }
+                token.private_key_path.as_ref().map(|private_key_path| {
+                    IdentityToken::X509(PathBuf::from(cert_path), PathBuf::from(private_key_path))
+                })
             } else {
                 None
             }
@@ -718,7 +727,7 @@ impl Client {
                     );
                     let preferred_locales = self.config.preferred_locales.clone();
                     Ok(SessionInfo {
-                        endpoint: endpoint.unwrap().clone(),
+                        endpoint: endpoint.unwrap(),
                         user_identity_token,
                         preferred_locales,
                     })

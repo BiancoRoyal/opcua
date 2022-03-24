@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! This simple OPC UA client will do the following:
 //!
@@ -84,7 +84,7 @@ fn main() -> Result<(), ()> {
 }
 
 fn subscribe_to_variables(session: Arc<RwLock<Session>>, ns: u16) -> Result<(), StatusCode> {
-    let mut session = session.write().unwrap();
+    let session = session.read().unwrap();
     // Creates a subscription with a data change callback
     let subscription_id = session.create_subscription(
         2000.0,

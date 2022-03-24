@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! Contains the implementation of `Variant`.
 
@@ -26,6 +26,7 @@ use crate::{
     qualified_name::QualifiedName,
     status_codes::StatusCode,
     string::{UAString, XmlElement},
+    DataValue, DiagnosticInfo,
 };
 
 pub(crate) struct EncodingMask {}
@@ -54,7 +55,9 @@ impl EncodingMask {
     pub const QUALIFIED_NAME: u8 = DataTypeId::QualifiedName as u8;
     pub const LOCALIZED_TEXT: u8 = DataTypeId::LocalizedText as u8;
     pub const EXTENSION_OBJECT: u8 = 22; // DataTypeId::ExtensionObject as u8;
-
+    pub const DATA_VALUE: u8 = DataTypeId::DataValue as u8;
+    pub const VARIANT: u8 = 24;
+    pub const DIAGNOSTIC: u8 = DataTypeId::DiagnosticInfo as u8;
     /// Bit indicates an array with dimensions
     pub const ARRAY_DIMENSIONS_BIT: u8 = 1 << 6;
     /// Bit indicates an array with values
@@ -117,6 +120,12 @@ pub enum Variant {
     ExpandedNodeId(Box<ExpandedNodeId>),
     /// ExtensionObject
     ExtensionObject(Box<ExtensionObject>),
+    // Variant
+    Variant(Box<Variant>),
+    // DataValue
+    DataValue(Box<DataValue>),
+    // Diagnostics
+    Diagnostics(Box<DiagnosticInfo>),
     /// Single dimension array which can contain any scalar type, all the same type. Nested
     /// arrays will be rejected.
     Array(Box<Array>),
@@ -150,6 +159,9 @@ pub enum VariantTypeId {
     NodeId,
     ExpandedNodeId,
     ExtensionObject,
+    Variant,
+    DataValue,
+    Diagnostic,
     Array,
 }
 
@@ -196,6 +208,15 @@ impl TryFrom<&NodeId> for VariantTypeId {
                     type_id if type_id == DataTypeId::LocalizedText as u32 => {
                         Ok(VariantTypeId::LocalizedText)
                     }
+                    type_id if type_id == DataTypeId::DataValue as u32 => {
+                        Ok(VariantTypeId::DataValue)
+                    }
+                    type_id if type_id == DataTypeId::BaseDataType as u32 => {
+                        Ok(VariantTypeId::Variant)
+                    }
+                    type_id if type_id == DataTypeId::DiagnosticInfo as u32 => {
+                        Ok(VariantTypeId::Diagnostic)
+                    }
                     _ => Err(()),
                 }
             } else {
@@ -235,36 +256,45 @@ impl VariantTypeId {
             VariantTypeId::NodeId => EncodingMask::NODE_ID,
             VariantTypeId::ExpandedNodeId => EncodingMask::EXPANDED_NODE_ID,
             VariantTypeId::ExtensionObject => EncodingMask::EXTENSION_OBJECT,
+            VariantTypeId::Variant => EncodingMask::VARIANT,
+            VariantTypeId::DataValue => EncodingMask::DATA_VALUE,
+            VariantTypeId::Diagnostic => EncodingMask::DIAGNOSTIC,
             VariantTypeId::Array => panic!("Type of array is unknown"),
         }
     }
 
-    pub fn from_encoding_mask(encoding_mask: u8) -> Self {
+    pub fn from_encoding_mask(encoding_mask: u8) -> Result<Self, StatusCode> {
         match encoding_mask & !EncodingMask::ARRAY_MASK {
-            0u8 => VariantTypeId::Empty,
-            EncodingMask::BOOLEAN => VariantTypeId::Boolean,
-            EncodingMask::SBYTE => VariantTypeId::SByte,
-            EncodingMask::BYTE => VariantTypeId::Byte,
-            EncodingMask::INT16 => VariantTypeId::Int16,
-            EncodingMask::UINT16 => VariantTypeId::UInt16,
-            EncodingMask::INT32 => VariantTypeId::Int32,
-            EncodingMask::UINT32 => VariantTypeId::UInt32,
-            EncodingMask::INT64 => VariantTypeId::Int64,
-            EncodingMask::UINT64 => VariantTypeId::UInt64,
-            EncodingMask::FLOAT => VariantTypeId::Float,
-            EncodingMask::DOUBLE => VariantTypeId::Double,
-            EncodingMask::STRING => VariantTypeId::String,
-            EncodingMask::DATE_TIME => VariantTypeId::DateTime,
-            EncodingMask::GUID => VariantTypeId::Guid,
-            EncodingMask::STATUS_CODE => VariantTypeId::StatusCode,
-            EncodingMask::BYTE_STRING => VariantTypeId::ByteString,
-            EncodingMask::XML_ELEMENT => VariantTypeId::XmlElement,
-            EncodingMask::QUALIFIED_NAME => VariantTypeId::QualifiedName,
-            EncodingMask::LOCALIZED_TEXT => VariantTypeId::LocalizedText,
-            EncodingMask::NODE_ID => VariantTypeId::NodeId,
-            EncodingMask::EXPANDED_NODE_ID => VariantTypeId::ExpandedNodeId,
-            EncodingMask::EXTENSION_OBJECT => VariantTypeId::ExtensionObject,
-            _ => panic!("Unrecognized encoding mask"),
+            0u8 => Ok(VariantTypeId::Empty),
+            EncodingMask::BOOLEAN => Ok(VariantTypeId::Boolean),
+            EncodingMask::SBYTE => Ok(VariantTypeId::SByte),
+            EncodingMask::BYTE => Ok(VariantTypeId::Byte),
+            EncodingMask::INT16 => Ok(VariantTypeId::Int16),
+            EncodingMask::UINT16 => Ok(VariantTypeId::UInt16),
+            EncodingMask::INT32 => Ok(VariantTypeId::Int32),
+            EncodingMask::UINT32 => Ok(VariantTypeId::UInt32),
+            EncodingMask::INT64 => Ok(VariantTypeId::Int64),
+            EncodingMask::UINT64 => Ok(VariantTypeId::UInt64),
+            EncodingMask::FLOAT => Ok(VariantTypeId::Float),
+            EncodingMask::DOUBLE => Ok(VariantTypeId::Double),
+            EncodingMask::STRING => Ok(VariantTypeId::String),
+            EncodingMask::DATE_TIME => Ok(VariantTypeId::DateTime),
+            EncodingMask::GUID => Ok(VariantTypeId::Guid),
+            EncodingMask::STATUS_CODE => Ok(VariantTypeId::StatusCode),
+            EncodingMask::BYTE_STRING => Ok(VariantTypeId::ByteString),
+            EncodingMask::XML_ELEMENT => Ok(VariantTypeId::XmlElement),
+            EncodingMask::QUALIFIED_NAME => Ok(VariantTypeId::QualifiedName),
+            EncodingMask::LOCALIZED_TEXT => Ok(VariantTypeId::LocalizedText),
+            EncodingMask::NODE_ID => Ok(VariantTypeId::NodeId),
+            EncodingMask::EXPANDED_NODE_ID => Ok(VariantTypeId::ExpandedNodeId),
+            EncodingMask::EXTENSION_OBJECT => Ok(VariantTypeId::ExtensionObject),
+            EncodingMask::VARIANT => Ok(VariantTypeId::Variant),
+            EncodingMask::DATA_VALUE => Ok(VariantTypeId::DataValue),
+            EncodingMask::DIAGNOSTIC => Ok(VariantTypeId::Diagnostic),
+            _ => {
+                error!("Unrecognized encoding mask");
+                Err(StatusCode::BadDecodingError)
+            }
         }
     }
 
@@ -457,22 +487,37 @@ impl From<ExtensionObject> for Variant {
     }
 }
 
+impl From<DataValue> for Variant {
+    fn from(v: DataValue) -> Self {
+        Variant::DataValue(Box::new(v))
+    }
+}
+
+impl From<DiagnosticInfo> for Variant {
+    fn from(v: DiagnosticInfo) -> Self {
+        Variant::Diagnostics(Box::new(v))
+    }
+}
+
 impl<'a, 'b> From<(VariantTypeId, &'a [&'b str])> for Variant {
     fn from(v: (VariantTypeId, &'a [&'b str])) -> Self {
         let values: Vec<Variant> = v.1.iter().map(|v| Variant::from(*v)).collect();
-        Variant::from(Array::new_single(v.0, values))
+        let value = Array::new_single(v.0, values).unwrap();
+        Variant::from(value)
     }
 }
 
 impl From<(VariantTypeId, Vec<Variant>)> for Variant {
     fn from(v: (VariantTypeId, Vec<Variant>)) -> Self {
-        Variant::from(Array::new_single(v.0, v.1))
+        let value = Array::new_single(v.0, v.1).unwrap();
+        Variant::from(value)
     }
 }
 
 impl From<(VariantTypeId, Vec<Variant>, Vec<u32>)> for Variant {
     fn from(v: (VariantTypeId, Vec<Variant>, Vec<u32>)) -> Self {
-        Variant::from(Array::new_multi(v.0, v.1, v.2))
+        let value = Array::new_multi(v.0, v.1, v.2).unwrap();
+        Variant::from(value)
     }
 }
 
@@ -536,7 +581,7 @@ macro_rules! from_array_to_variant_impl {
         impl<'a> From<&'a [$rtype]> for Variant {
             fn from(v: &'a [$rtype]) -> Self {
                 let array: Vec<Variant> = v.iter().map(|v| Variant::from(v.clone())).collect();
-                Variant::from(($encoding_mask, array))
+                Variant::try_from(($encoding_mask, array)).unwrap()
             }
         }
     };
@@ -636,6 +681,9 @@ impl BinaryEncoder<Variant> for Variant {
             Variant::QualifiedName(value) => value.byte_len(),
             Variant::LocalizedText(value) => value.byte_len(),
             Variant::ExtensionObject(value) => value.byte_len(),
+            Variant::DataValue(value) => value.byte_len(),
+            Variant::Variant(value) => value.byte_len(),
+            Variant::Diagnostics(value) => value.byte_len(),
             Variant::Array(array) => {
                 // Array length
                 let mut size = 4;
@@ -643,7 +691,7 @@ impl BinaryEncoder<Variant> for Variant {
                 size += array
                     .values
                     .iter()
-                    .map(|v| Variant::byte_len_variant_value(v))
+                    .map(Variant::byte_len_variant_value)
                     .sum::<usize>();
                 if array.has_dimensions() {
                     // Dimensions (size + num elements)
@@ -686,6 +734,9 @@ impl BinaryEncoder<Variant> for Variant {
             Variant::QualifiedName(value) => value.encode(stream)?,
             Variant::LocalizedText(value) => value.encode(stream)?,
             Variant::ExtensionObject(value) => value.encode(stream)?,
+            Variant::DataValue(value) => value.encode(stream)?,
+            Variant::Variant(value) => value.encode(stream)?,
+            Variant::Diagnostics(value) => value.encode(stream)?,
             Variant::Array(array) => {
                 let mut size = write_i32(stream, array.values.len() as i32)?;
                 for value in array.values.iter() {
@@ -713,9 +764,19 @@ impl BinaryEncoder<Variant> for Variant {
         let encoding_mask = u8::decode(stream, decoding_options)?;
         let element_encoding_mask = encoding_mask & !EncodingMask::ARRAY_MASK;
 
+        // IMPORTANT NOTE: Arrays are constructed through Array::new_multi or Array::new_single
+        // to correctly process failures. Don't use Variant::from((value_type, values)) since
+        // this will panic & break the runtime. We don't want this when dealing with potentially
+        // malicious data.
+
         // Read array length
         let array_length = if encoding_mask & EncodingMask::ARRAY_VALUES_BIT != 0 {
             let array_length = i32::decode(stream, decoding_options)?;
+            // null array of type
+            if array_length == -1 {
+                let value_type_id = VariantTypeId::from_encoding_mask(element_encoding_mask)?;
+                return Array::new_multi(value_type_id, Vec::new(), Vec::new()).map(Variant::from);
+            }
             if array_length <= 0 {
                 error!("Invalid array_length {}", array_length);
                 return Err(StatusCode::BadDecodingError);
@@ -740,15 +801,24 @@ impl BinaryEncoder<Variant> for Variant {
                     decoding_options,
                 )?);
             }
-            let value_type_id = VariantTypeId::from_encoding_mask(element_encoding_mask);
+            let value_type_id = VariantTypeId::from_encoding_mask(element_encoding_mask)?;
             if encoding_mask & EncodingMask::ARRAY_DIMENSIONS_BIT != 0 {
                 if let Some(dimensions) = read_array(stream, decoding_options)? {
                     if dimensions.iter().any(|d| *d == 0) {
                         error!("Invalid array dimensions");
                         Err(StatusCode::BadDecodingError)
                     } else {
-                        let array_dimensions_length =
-                            dimensions.iter().fold(1u32, |sum, d| sum * *d);
+                        // This looks clunky but it's to prevent a panic from malicious data
+                        // causing an overflow panic
+                        let mut array_dimensions_length = 1u32;
+                        for d in &dimensions {
+                            if let Some(v) = array_dimensions_length.checked_mul(*d) {
+                                array_dimensions_length = v;
+                            } else {
+                                error!("Array dimension overflow!");
+                                return Err(StatusCode::BadDecodingError);
+                            }
+                        }
                         if array_dimensions_length != array_length as u32 {
                             error!(
                                 "Array dimensions does not match array length {}",
@@ -756,7 +826,8 @@ impl BinaryEncoder<Variant> for Variant {
                             );
                             Err(StatusCode::BadDecodingError)
                         } else {
-                            Ok(Variant::from((value_type_id, values, dimensions)))
+                            // Note Array::new_multi can fail
+                            Array::new_multi(value_type_id, values, dimensions).map(Variant::from)
                         }
                     }
                 } else {
@@ -764,7 +835,8 @@ impl BinaryEncoder<Variant> for Variant {
                     Err(StatusCode::BadDecodingError)
                 }
             } else {
-                Ok(Variant::from((value_type_id, values)))
+                // Note Array::new_single can fail
+                Array::new_single(value_type_id, values).map(Variant::from)
             }
         } else if encoding_mask & EncodingMask::ARRAY_DIMENSIONS_BIT != 0 {
             error!("Array dimensions bit specified without any values");
@@ -798,11 +870,12 @@ impl fmt::Display for Variant {
             Variant::Float(v) => write!(f, "{}", v),
             Variant::Double(v) => write!(f, "{}", v),
             Variant::Boolean(v) => write!(f, "{}", v),
-            Variant::String(ref v) => write!(f, "{}", v.to_string()),
-            Variant::Guid(ref v) => write!(f, "{}", v.to_string()),
-            Variant::DateTime(ref v) => write!(f, "{}", v.to_string()),
-            Variant::NodeId(ref v) => write!(f, "{}", v.to_string()),
-            Variant::ExpandedNodeId(ref v) => write!(f, "{}", v.to_string()),
+            Variant::String(ref v) => write!(f, "{}", v),
+            Variant::Guid(ref v) => write!(f, "{}", v),
+            Variant::DateTime(ref v) => write!(f, "{}", v),
+            Variant::NodeId(ref v) => write!(f, "{}", v),
+            Variant::ExpandedNodeId(ref v) => write!(f, "{}", v),
+            Variant::Variant(ref v) => write!(f, "Variant({})", v),
             value => write!(f, "{:?}", value),
         }
     }
@@ -840,6 +913,9 @@ impl Variant {
             Variant::QualifiedName(value) => value.byte_len(),
             Variant::LocalizedText(value) => value.byte_len(),
             Variant::ExtensionObject(value) => value.byte_len(),
+            Variant::Variant(value) => value.byte_len(),
+            Variant::DataValue(value) => value.byte_len(),
+            Variant::Diagnostics(value) => value.byte_len(),
             _ => {
                 error!("Cannot compute length of this type (probably nested array)");
                 0
@@ -873,6 +949,9 @@ impl Variant {
             Variant::QualifiedName(value) => value.encode(stream),
             Variant::LocalizedText(value) => value.encode(stream),
             Variant::ExtensionObject(value) => value.encode(stream),
+            Variant::Variant(value) => value.encode(stream),
+            Variant::DataValue(value) => value.encode(stream),
+            Variant::Diagnostics(value) => value.encode(stream),
             _ => {
                 warn!("Cannot encode this variant value type (probably nested array)");
                 Err(StatusCode::BadEncodingError)
@@ -933,6 +1012,12 @@ impl Variant {
             Self::from(LocalizedText::decode(stream, decoding_options)?)
         } else if Self::test_encoding_flag(encoding_mask, EncodingMask::EXTENSION_OBJECT) {
             Self::from(ExtensionObject::decode(stream, decoding_options)?)
+        } else if Self::test_encoding_flag(encoding_mask, EncodingMask::VARIANT) {
+            Variant::Variant(Box::new(Variant::decode(stream, decoding_options)?))
+        } else if Self::test_encoding_flag(encoding_mask, EncodingMask::DATA_VALUE) {
+            Self::from(DataValue::decode(stream, decoding_options)?)
+        } else if Self::test_encoding_flag(encoding_mask, EncodingMask::DIAGNOSTIC) {
+            Self::from(DiagnosticInfo::decode(stream, decoding_options)?)
         } else {
             Variant::Empty
         };
@@ -1420,6 +1505,9 @@ impl Variant {
             Variant::QualifiedName(_) => VariantTypeId::QualifiedName,
             Variant::LocalizedText(_) => VariantTypeId::LocalizedText,
             Variant::ExtensionObject(_) => VariantTypeId::ExtensionObject,
+            Variant::Variant(_) => VariantTypeId::Variant,
+            Variant::DataValue(_) => VariantTypeId::DataValue,
+            Variant::Diagnostics(_) => VariantTypeId::Diagnostic,
             Variant::Array(_) => VariantTypeId::Array,
         }
     }
@@ -1527,6 +1615,9 @@ impl Variant {
             Variant::StatusCode(_) => Some(DataTypeId::StatusCode.into()),
             Variant::QualifiedName(_) => Some(DataTypeId::QualifiedName.into()),
             Variant::LocalizedText(_) => Some(DataTypeId::LocalizedText.into()),
+            Variant::Variant(_) => Some(DataTypeId::BaseDataType.into()),
+            Variant::DataValue(_) => Some(DataTypeId::DataValue.into()),
+            Variant::Diagnostics(_) => Some(DataTypeId::DiagnosticInfo.into()),
             _ => None,
         }
     }
@@ -1557,23 +1648,27 @@ impl Variant {
             Variant::QualifiedName(_) => EncodingMask::QUALIFIED_NAME,
             Variant::LocalizedText(_) => EncodingMask::LOCALIZED_TEXT,
             Variant::ExtensionObject(_) => EncodingMask::EXTENSION_OBJECT,
+            Variant::Variant(_) => EncodingMask::VARIANT,
+            Variant::DataValue(_) => EncodingMask::DATA_VALUE,
+            Variant::Diagnostics(_) => EncodingMask::DIAGNOSTIC,
             Variant::Array(array) => array.encoding_mask(),
         }
     }
 
     /// This function is for a special edge case of converting a byte string to a
     /// single array of bytes
-    pub fn to_byte_array(&self) -> Self {
-        match self {
+    pub fn to_byte_array(&self) -> Result<Self, StatusCode> {
+        let array = match self {
             Variant::ByteString(values) => match &values.value {
-                None => Variant::from(Array::new_single(VariantTypeId::Byte, vec![])),
+                None => Array::new_single(VariantTypeId::Byte, vec![])?,
                 Some(values) => {
                     let values: Vec<Variant> = values.iter().map(|v| Variant::Byte(*v)).collect();
-                    Variant::from(Array::new_single(VariantTypeId::Byte, values))
+                    Array::new_single(VariantTypeId::Byte, values)?
                 }
             },
             _ => panic!(),
-        }
+        };
+        Ok(Variant::from(array))
     }
 
     /// This function returns a substring of a ByteString or a UAString
@@ -1581,11 +1676,11 @@ impl Variant {
         match self {
             Variant::ByteString(v) => v
                 .substring(min, max)
-                .map(|v| v.into())
+                .map(Variant::from)
                 .map_err(|_| StatusCode::BadIndexRangeNoData),
             Variant::String(v) => v
                 .substring(min, max)
-                .map(|v| v.into())
+                .map(Variant::from)
                 .map_err(|_| StatusCode::BadIndexRangeNoData),
             _ => panic!("Should not be calling substring on other types"),
         }

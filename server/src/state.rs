@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! Provides server state information, such as status, configuration, running servers and so on.
 
@@ -157,7 +157,7 @@ impl ServerState {
             }
         }
 
-        let config = trace_read_lock_unwrap!(self.config);
+        let config = trace_read_lock!(self.config);
         if let Ok(hostname) = hostname_from_url(endpoint_url.as_ref()) {
             if !hostname.eq_ignore_ascii_case(&config.tcp_config.host) {
                 debug!("Endpoint url \"{}\" hostname supplied by caller does not match server's hostname \"{}\"", endpoint_url, &config.tcp_config.host);
@@ -187,7 +187,7 @@ impl ServerState {
         security_policy: SecurityPolicy,
         security_mode: MessageSecurityMode,
     ) -> bool {
-        let config = trace_read_lock_unwrap!(self.config);
+        let config = trace_read_lock!(self.config);
         config
             .find_endpoint(endpoint_url, security_policy, security_mode)
             .is_some()
@@ -201,7 +201,7 @@ impl ServerState {
         endpoint_url: &str,
     ) -> Option<Vec<EndpointDescription>> {
         debug!("find_endpoint, url = {}", endpoint_url);
-        let config = trace_read_lock_unwrap!(self.config);
+        let config = trace_read_lock!(self.config);
         let base_endpoint_url = config.base_endpoint_url();
         let endpoints: Vec<EndpointDescription> = config
             .endpoints
@@ -348,7 +348,7 @@ impl ServerState {
     }
 
     pub fn discovery_urls(&self) -> Option<Vec<UAString>> {
-        let config = trace_read_lock_unwrap!(self.config);
+        let config = trace_read_lock!(self.config);
         if config.discovery_urls.is_empty() {
             None
         } else {
@@ -436,7 +436,7 @@ impl ServerState {
         server_nonce: &ByteString,
     ) -> Result<String, StatusCode> {
         // Get security from endpoint url
-        let config = trace_read_lock_unwrap!(self.config);
+        let config = trace_read_lock!(self.config);
 
         if let Some(endpoint) = config.find_endpoint(endpoint_url, security_policy, security_mode) {
             // Now validate the user identity token
@@ -486,7 +486,7 @@ impl ServerState {
 
     /// Returns the decoding options of the server
     pub fn decoding_options(&self) -> DecodingOptions {
-        let config = trace_read_lock_unwrap!(self.config);
+        let config = trace_read_lock!(self.config);
         config.decoding_options()
     }
 
@@ -538,7 +538,7 @@ impl ServerState {
             let token_password = if !token.encryption_algorithm.is_null() {
                 if let Some(ref server_key) = server_key {
                     user_identity::decrypt_user_identity_token_password(
-                        &token,
+                        token,
                         server_nonce.as_ref(),
                         server_key,
                     )?
@@ -670,7 +670,7 @@ impl ServerState {
     where
         T: AuditEvent + Event,
     {
-        let audit_log = trace_write_lock_unwrap!(self.audit_log);
+        let audit_log = trace_write_lock!(self.audit_log);
         audit_log.raise_and_log(event)
     }
 }

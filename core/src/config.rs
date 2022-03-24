@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -42,16 +42,13 @@ pub trait Config: serde::Serialize {
         if let Ok(mut f) = File::open(path) {
             let mut s = String::new();
             if f.read_to_string(&mut s).is_ok() {
-                let config = serde_yaml::from_str(&s);
-                if let Ok(config) = config {
-                    Ok(config)
-                } else {
+                serde_yaml::from_str(&s).map_err(|err| {
                     error!(
-                        "Cannot deserialize configuration from {}",
-                        path.to_string_lossy()
+                        "Cannot deserialize configuration from {}, error reason: {}",
+                        path.to_string_lossy(),
+                        err.to_string()
                     );
-                    Err(())
-                }
+                })
             } else {
                 error!(
                     "Cannot read configuration file {} to string",

@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! Contains the implementation of `Variable` and `VariableBuilder`.
 
@@ -473,8 +473,12 @@ impl Variable {
                     data_encoding,
                     max_age,
                 )
-                .unwrap()
-                .unwrap()
+                .unwrap_or_else(|status_code| {
+                    let mut value = DataValue::default();
+                    value.status = Some(status_code);
+                    Some(value)
+                })
+                .unwrap_or_default()
         } else {
             let data_value = &self.value;
             let mut result = DataValue {
@@ -520,7 +524,7 @@ impl Variable {
                 if self.data_type == DataTypeId::Byte.into() {
                     if let Variant::ByteString(_) = value {
                         // Convert the value from a byte string to a byte array
-                        value = value.to_byte_array();
+                        value = value.to_byte_array()?;
                     }
                 }
             }

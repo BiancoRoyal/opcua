@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! This is a demo server for OPC UA. It demonstrates most of the features of OPC UA for Rust.
 //!
@@ -46,7 +46,7 @@ impl Args {
 
     pub fn usage() {
         println!(
-            r#"Simple Client
+            r#"Demo Server
 Usage:
   -h, --help   Show help
   -r, --raise-events Raise events on a timer (default: false)"#
@@ -109,7 +109,6 @@ fn start_http_server(server: &Server) {
     let server_state = server.server_state();
     let connections = server.connections();
     let metrics = server.server_metrics();
-    let single_threaded_executor = server.single_threaded_executor();
     // The index.html is in a path relative to the working dir.
     let _ = http::run_http_server(
         "127.0.0.1:8585",
@@ -117,6 +116,5 @@ fn start_http_server(server: &Server) {
         server_state,
         connections,
         metrics,
-        single_threaded_executor,
     );
 }

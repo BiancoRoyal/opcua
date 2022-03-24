@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! Contains the implementation of `NumericRange`.
 
@@ -167,12 +167,12 @@ impl FromStr for NumericRange {
             // Split the string on the comma
             let parts: Vec<_> = s.split(',').collect();
             match parts.len() {
-                1 => Self::parse_range(&parts[0]),
+                1 => Self::parse_range(parts[0]),
                 2..=MAX_INDICES => {
                     // Multi dimensions
                     let mut ranges = Vec::with_capacity(parts.len());
                     for p in &parts {
-                        if let Ok(range) = Self::parse_range(&p) {
+                        if let Ok(range) = Self::parse_range(p) {
                             ranges.push(range);
                         } else {
                             return Err(NumericRangeError);

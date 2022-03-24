@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 use std::{
     self,
@@ -140,7 +140,7 @@ impl RequestHeader {
     ) -> RequestHeader {
         RequestHeader {
             authentication_token: authentication_token.clone(),
-            timestamp: timestamp.clone(),
+            timestamp: *timestamp,
             request_handle,
             return_diagnostics: DiagnosticBits::empty(),
             audit_entry_id: UAString::null(),

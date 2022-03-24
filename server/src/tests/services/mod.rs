@@ -1,7 +1,6 @@
 use std::sync::{Arc, RwLock};
 
 use crate::{
-    comms::transport::Transport,
     prelude::*,
     services::{monitored_item::MonitoredItemService, subscription::SubscriptionService},
     session::Session,
@@ -10,24 +9,34 @@ use crate::{
 };
 
 struct ServiceTest {
-    pub server: Server,
     pub server_state: Arc<RwLock<ServerState>>,
     pub address_space: Arc<RwLock<AddressSpace>>,
     pub session: Arc<RwLock<Session>>,
+    pub session_manager: Arc<RwLock<SessionManager>>,
 }
 
 impl ServiceTest {
     pub fn new() -> ServiceTest {
-        let server = ServerBuilder::new_sample().server().unwrap();
-        let tcp_transport = server.new_transport();
+        Self::new_with_server(ServerBuilder::new_sample())
+    }
+
+    pub fn new_with_server(server_builder: ServerBuilder) -> ServiceTest {
+        let server = server_builder.server().unwrap();
         let server_state = server.server_state();
         let address_space = server.address_space();
-        let session = tcp_transport.session();
+        let session = Arc::new(RwLock::new(Session::new(server_state.clone())));
+        let session_manager = Arc::new(RwLock::new(SessionManager::default()));
+
+        {
+            let mut session_manager = trace_write_lock!(session_manager);
+            session_manager.register_session(session.clone());
+        }
+
         ServiceTest {
-            server,
             server_state,
             address_space,
             session,
+            session_manager,
         }
     }
 
@@ -60,7 +69,7 @@ fn add_many_vars_to_address_space(
     address_space: Arc<RwLock<AddressSpace>>,
     vars_to_add: usize,
 ) -> (NodeId, Vec<NodeId>) {
-    let mut address_space = trace_write_lock_unwrap!(address_space);
+    let mut address_space = trace_write_lock!(address_space);
 
     // Create a sample folder under objects folder
     let sample_folder_id = address_space

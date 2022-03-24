@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! Provides subscription and monitored item tracking.
 //!
@@ -318,7 +318,7 @@ impl Subscription {
     pub(crate) fn delete_monitored_items(&mut self, items_to_delete: &[u32]) {
         items_to_delete.iter().for_each(|id| {
             // Remove the monitored item and the client handle / id entry
-            if let Some(monitored_item) = self.monitored_items.remove(&id) {
+            if let Some(monitored_item) = self.monitored_items.remove(id) {
                 let _ = self.client_handles.remove(&monitored_item.client_handle());
             }
         })
@@ -336,13 +336,11 @@ impl Subscription {
     }
 
     fn monitored_item_id_from_handle(&self, client_handle: u32) -> Option<u32> {
-        self.client_handles
-            .get(&client_handle)
-            .map(|monitored_item_id| *monitored_item_id)
+        self.client_handles.get(&client_handle).copied()
     }
 
     pub(crate) fn on_event(&mut self, events: &[EventNotificationList]) {
-        let mut cb = trace_lock_unwrap!(self.notification_callback);
+        let mut cb = trace_lock!(self.notification_callback);
         events.iter().for_each(|event| {
             cb.on_event(event);
         });
@@ -369,18 +367,18 @@ impl Subscription {
                 if !monitored_item_ids.is_empty() {
                     let data_change_items: Vec<&MonitoredItem> = monitored_item_ids
                         .iter()
-                        .map(|id| self.monitored_items.get(&id).unwrap())
+                        .map(|id| self.monitored_items.get(id).unwrap())
                         .collect();
 
                     {
                         // Call the call back with the changes we collected
-                        let mut cb = trace_lock_unwrap!(self.notification_callback);
+                        let mut cb = trace_lock!(self.notification_callback);
                         cb.on_data_change(&data_change_items);
                     }
 
                     // Clear the values
                     monitored_item_ids.iter().for_each(|id| {
-                        let m = self.monitored_items.get_mut(&id).unwrap();
+                        let m = self.monitored_items.get_mut(id).unwrap();
                         m.clear_values();
                     });
                 }

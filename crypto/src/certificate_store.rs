@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! The certificate store holds and retrieves private keys and certificates from disk. It is responsible
 //! for checking certificates supplied by the remote end to see if they are valid and trusted or not.
@@ -32,22 +32,22 @@ const REJECTED_CERTS_DIR: &str = "rejected";
 /// and the trust / rejection of certificates from the other end.
 pub struct CertificateStore {
     /// Path to the applications own certificate
-    pub own_certificate_path: PathBuf,
+    own_certificate_path: PathBuf,
     /// Path to the applications own private key
-    pub own_private_key_path: PathBuf,
+    own_private_key_path: PathBuf,
     /// Path to the certificate store on disk
-    pub pki_path: PathBuf,
+    pub(crate) pki_path: PathBuf,
     /// Timestamps of the cert are normally checked on the cert to ensure it cannot be used before
     /// or after its limits, but this check can be disabled.
-    pub check_time: bool,
+    check_time: bool,
     /// This option lets you skip additional certificate validations (e.g. hostname, application
     /// uri and the not before / after values). Certificates are always checked to see if they are
     /// trusted and have a valid key length.
-    pub skip_verify_certs: bool,
+    skip_verify_certs: bool,
     /// Ordinarily an unknown cert will be dropped into the rejected folder, but it can be dropped
     /// into the trusted folder if this flag is set. Certs in the trusted folder must still pass
     /// validity checks.
-    pub trust_unknown_certs: bool,
+    trust_unknown_certs: bool,
 }
 
 impl CertificateStore {
@@ -110,6 +110,18 @@ impl CertificateStore {
         (certificate_store, cert, pkey)
     }
 
+    pub fn set_skip_verify_certs(&mut self, skip_verify_certs: bool) {
+        self.skip_verify_certs = skip_verify_certs;
+    }
+
+    pub fn set_trust_unknown_certs(&mut self, trust_unknown_certs: bool) {
+        self.trust_unknown_certs = trust_unknown_certs;
+    }
+
+    pub fn set_check_time(&mut self, check_time: bool) {
+        self.check_time = check_time;
+    }
+
     /// Reads a private key from a path on disk.
     pub fn read_pkey(path: &Path) -> Result<PrivateKey, String> {
         if let Ok(pkey_info) = metadata(path) {
@@ -163,12 +175,12 @@ impl CertificateStore {
         let (cert, pkey) = X509::cert_and_pkey(args)?;
 
         // Write the public cert
-        let _ = CertificateStore::store_cert(&cert, &cert_path, overwrite)?;
+        let _ = CertificateStore::store_cert(&cert, cert_path, overwrite)?;
 
         // Write the private key
         let pem = pkey.private_key_to_pem().unwrap();
         info!("Writing private key to {}", &pkey_path.display());
-        let _ = CertificateStore::write_to_file(&pem, &pkey_path, overwrite)?;
+        let _ = CertificateStore::write_to_file(&pem, pkey_path, overwrite)?;
         Ok((cert, pkey))
     }
 
@@ -267,7 +279,7 @@ impl CertificateStore {
         hostname: Option<&str>,
         application_uri: Option<&str>,
     ) -> StatusCode {
-        let cert_file_name = CertificateStore::cert_file_name(&cert);
+        let cert_file_name = CertificateStore::cert_file_name(cert);
         debug!("Validating cert with name on disk {}", cert_file_name);
 
         // Look for the cert in the rejected folder. If it's rejected there is no purpose going
@@ -402,7 +414,7 @@ impl CertificateStore {
     /// the cert's common name being empty or not
     pub fn cert_file_name(cert: &X509) -> String {
         let prefix = if let Ok(common_name) = cert.common_name() {
-            common_name.trim().to_string()
+            common_name.trim().to_string().replace('/', "")
         } else {
             String::new()
         };
@@ -488,7 +500,7 @@ impl CertificateStore {
     ///
     pub fn store_rejected_cert(&self, cert: &X509) -> Result<PathBuf, String> {
         // Store the cert in the rejected folder where untrusted certs go
-        let cert_file_name = CertificateStore::cert_file_name(&cert);
+        let cert_file_name = CertificateStore::cert_file_name(cert);
         let mut cert_path = self.rejected_certs_dir();
         cert_path.push(&cert_file_name);
         let _ = CertificateStore::store_cert(cert, &cert_path, true)?;
@@ -504,7 +516,7 @@ impl CertificateStore {
     ///
     fn store_trusted_cert(&self, cert: &X509) -> Result<PathBuf, String> {
         // Store the cert in the trusted folder where trusted certs go
-        let cert_file_name = CertificateStore::cert_file_name(&cert);
+        let cert_file_name = CertificateStore::cert_file_name(cert);
         let mut cert_path = self.trusted_certs_dir();
         cert_path.push(&cert_file_name);
         let _ = CertificateStore::store_cert(cert, &cert_path, true)?;
@@ -520,7 +532,7 @@ impl CertificateStore {
     fn store_cert(cert: &X509, path: &Path, overwrite: bool) -> Result<usize, String> {
         let der = cert.to_der().unwrap();
         info!("Writing X509 cert to {}", path.display());
-        CertificateStore::write_to_file(&der, &path, overwrite)
+        CertificateStore::write_to_file(&der, path, overwrite)
     }
 
     /// Reads an X509 certificate in .def or .pem format from disk

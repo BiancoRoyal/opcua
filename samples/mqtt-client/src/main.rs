@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! This is a sample OPC UA Client that connects to the specified server, fetches some
 //! values before exiting.
@@ -133,7 +133,7 @@ fn subscription_loop(
     // This scope is important - we don't want to session to be locked when the code hits the
     // loop below
     {
-        let mut session = session.write().unwrap();
+        let session = session.read().unwrap();
 
         // Creates our subscription - one update every second. The update is sent as a message
         // to the MQTT thread to be published.

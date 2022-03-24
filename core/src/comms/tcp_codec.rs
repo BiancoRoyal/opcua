@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! The codec is an implementation of a tokio Encoder/Decoder which can be used to read
 //! data from the socket in terms of frames which in our case are any of the following:
@@ -15,7 +15,7 @@ use std::io;
 use std::sync::{Arc, RwLock};
 
 use bytes::{BufMut, BytesMut};
-use tokio_io::codec::{Decoder, Encoder};
+use tokio_util::codec::{Decoder, Encoder};
 
 use opcua_types::{
     encoding::{BinaryEncoder, DecodingOptions},
@@ -74,7 +74,7 @@ impl Decoder for TcpCodec {
                 let message =
                     Self::decode_message(message_header, &mut buf, &self.decoding_options)
                         .map_err(|e| {
-                            error!("Codec got an error {:?} while decoding a message", e);
+                            error!("Codec got an error {} while decoding a message", e);
                             io::Error::from(e)
                         })?;
                 Ok(Some(message))
@@ -88,11 +88,10 @@ impl Decoder for TcpCodec {
     }
 }
 
-impl Encoder for TcpCodec {
-    type Item = Message;
+impl Encoder<Message> for TcpCodec {
     type Error = io::Error;
 
-    fn encode(&mut self, data: Self::Item, buf: &mut BytesMut) -> Result<(), io::Error> {
+    fn encode(&mut self, data: Message, buf: &mut BytesMut) -> Result<(), io::Error> {
         match data {
             Message::Hello(msg) => self.write(msg, buf),
             Message::Acknowledge(msg) => self.write(msg, buf),

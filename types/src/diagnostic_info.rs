@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 //! Contains the implementation of `DiagnosticInfo`.
 
@@ -46,7 +46,7 @@ bitflags! {
 }
 
 /// Diagnostic information.
-#[derive(PartialEq, Debug, Clone)]
+#[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticInfo {
     /// A symbolic name for the status code.
     pub symbolic_id: Option<i32>,

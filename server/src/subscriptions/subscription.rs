@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2020 Adam Lock
+// Copyright (C) 2017-2022 Adam Lock
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
@@ -163,7 +163,7 @@ pub struct Subscription {
 impl Drop for Subscription {
     fn drop(&mut self) {
         if self.diagnostics_on_drop {
-            let mut diagnostics = trace_write_lock_unwrap!(self.diagnostics);
+            let mut diagnostics = trace_write_lock!(self.diagnostics);
             diagnostics.on_destroy_subscription(self);
         }
     }
@@ -203,7 +203,7 @@ impl Subscription {
             diagnostics_on_drop: true,
         };
         {
-            let mut diagnostics = trace_write_lock_unwrap!(subscription.diagnostics);
+            let mut diagnostics = trace_write_lock!(subscription.diagnostics);
             diagnostics.on_create_subscription(&subscription);
         }
         subscription
