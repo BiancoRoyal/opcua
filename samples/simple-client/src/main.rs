@@ -7,9 +7,10 @@
 //! 1. Create a client configuration
 //! 2. Connect to an endpoint specified by the url with security None
 //! 3. Subscribe to values and loop forever printing out their values
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-use opcua_client::prelude::*;
+use opcua::client::prelude::*;
+use opcua::sync::RwLock;
 
 struct Args {
     help: bool,
@@ -47,7 +48,7 @@ fn main() -> Result<(), ()> {
         Args::usage();
     } else {
         // Optional - enable OPC UA logging
-        opcua_console_logging::init();
+        opcua::console_logging::init();
 
         // Make the client configuration
         let mut client = ClientBuilder::new()
@@ -84,7 +85,7 @@ fn main() -> Result<(), ()> {
 }
 
 fn subscribe_to_variables(session: Arc<RwLock<Session>>, ns: u16) -> Result<(), StatusCode> {
-    let session = session.read().unwrap();
+    let session = session.read();
     // Creates a subscription with a data change callback
     let subscription_id = session.create_subscription(
         2000.0,

@@ -8,7 +8,7 @@ extern crate serde_derive;
 
 use std::{
     str::FromStr,
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -19,7 +19,8 @@ use actix_web::{
     ws, App, Error, HttpRequest, HttpResponse,
 };
 
-use opcua_client::prelude::*;
+use opcua::client::prelude::*;
+use opcua::sync::RwLock;
 
 struct Args {
     help: bool,
@@ -56,7 +57,7 @@ fn main() -> Result<(), ()> {
         Args::usage();
     } else {
         // Optional - enable OPC UA logging
-        opcua_console_logging::init();
+        opcua::console_logging::init();
         // Run the http server
         run_server(format!("127.0.0.1:{}", args.http_port));
     }
@@ -198,7 +199,7 @@ impl OPCUASession {
         ) {
             Ok(session) => {
                 {
-                    let mut session = session.write().unwrap();
+                    let mut session = session.write();
                     let addr_for_connection_status_change = addr.clone();
                     session.set_connection_status_callback(ConnectionStatusCallback::new(
                         move |connected| {
@@ -236,7 +237,7 @@ impl OPCUASession {
 
     fn disconnect(&mut self, _ctx: &mut <Self as Actor>::Context) {
         if let Some(ref mut session) = self.session {
-            let session = session.read().unwrap();
+            let session = session.read();
             if session.is_connected() {
                 session.disconnect();
             }
@@ -288,7 +289,7 @@ impl OPCUASession {
         let select_criteria = args.get(2).unwrap();
 
         if let Some(ref mut session) = self.session {
-            let session = session.read().unwrap();
+            let session = session.read();
 
             let event_node_id = NodeId::from_str(event_node_id);
             if event_node_id.is_err() {
@@ -398,7 +399,7 @@ impl OPCUASession {
             // Create a subscription
             println!("Creating subscription");
 
-            let session = session.read().unwrap();
+            let session = session.read();
             // Creates our subscription
             let addr_for_datachange = ctx.address();
 

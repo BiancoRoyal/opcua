@@ -4,15 +4,16 @@
 
 //! A sample method
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-use opcua_server::{
+use opcua::server::{
     address_space::method::MethodBuilder, callbacks, prelude::*, session::SessionManager,
 };
+use opcua::sync::RwLock;
 
 pub fn add_methods(server: &mut Server, ns: u16) {
     let address_space = server.address_space();
-    let mut address_space = address_space.write().unwrap();
+    let mut address_space = address_space.write();
 
     let object_id = NodeId::new(ns, "Functions");
     ObjectBuilder::new(&object_id, "Functions", "Functions")
@@ -52,7 +53,7 @@ pub fn add_methods(server: &mut Server, ns: u16) {
     MethodBuilder::new(&fn_node_id, "Boop", "Boop")
         .component_of(object_id.clone())
         .input_args(&mut address_space, &[("Ping", DataTypeId::String).into()])
-        .callback(Box::new(HelloX))
+        .callback(Box::new(Boop))
         .insert(&mut address_space);
 }
 
