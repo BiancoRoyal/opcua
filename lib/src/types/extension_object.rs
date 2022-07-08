@@ -44,6 +44,12 @@ pub struct ExtensionObject {
     pub body: ExtensionObjectEncoding,
 }
 
+impl Default for ExtensionObject {
+    fn default() -> Self {
+        Self::null()
+    }
+}
+
 impl BinaryEncoder<ExtensionObject> for ExtensionObject {
     fn byte_len(&self) -> usize {
         let mut size = self.node_id.byte_len();
@@ -84,6 +90,8 @@ impl BinaryEncoder<ExtensionObject> for ExtensionObject {
     }
 
     fn decode<S: Read>(stream: &mut S, decoding_options: &DecodingOptions) -> EncodingResult<Self> {
+        // Extension object is depth checked to prevent deep recursion
+        let _depth_lock = decoding_options.depth_lock()?;
         let node_id = NodeId::decode(stream, decoding_options)?;
         let encoding_type = u8::decode(stream, decoding_options)?;
         let body = match encoding_type {

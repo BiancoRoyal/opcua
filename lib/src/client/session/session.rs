@@ -21,58 +21,38 @@ use tokio::{
     time::{interval, Duration, Instant},
 };
 
-use crate::core::{
-    comms::{
-        secure_channel::{Role, SecureChannel},
-        url::*,
+use crate::{
+    client::{
+        callbacks::{OnConnectionStatusChange, OnSessionClosed, OnSubscriptionNotification},
+        client::IdentityToken,
+        comms::tcp_transport::TcpTransport,
+        process_service_result, process_unexpected_response,
+        session::{
+            services::*,
+            session_debug, session_error,
+            session_state::{ConnectionState, SessionState},
+            session_trace, session_warn,
+        },
+        session_retry_policy::{Answer, SessionRetryPolicy},
+        subscription::{self, Subscription},
+        subscription_state::SubscriptionState,
     },
-    supported_message::SupportedMessage,
-    RUNTIME,
+    core::{
+        comms::{
+            secure_channel::{Role, SecureChannel},
+            url::*,
+        },
+        supported_message::SupportedMessage,
+        RUNTIME,
+    },
+    crypto::{
+        self as crypto, user_identity::make_user_name_identity_token, CertificateStore,
+        SecurityPolicy, X509,
+    },
+    deregister_runtime_component, register_runtime_component,
+    sync::*,
+    types::{node_ids::ObjectId, status_code::StatusCode, *},
 };
-use crate::crypto::{
-    self as crypto, user_identity::make_user_name_identity_token, CertificateStore, SecurityPolicy,
-    X509,
-};
-use crate::sync::*;
-use crate::types::{node_ids::ObjectId, status_code::StatusCode, *};
-use crate::{deregister_runtime_component, register_runtime_component};
-
-use crate::client::{
-    callbacks::{OnConnectionStatusChange, OnSessionClosed, OnSubscriptionNotification},
-    client::IdentityToken,
-    comms::tcp_transport::TcpTransport,
-    message_queue::MessageQueue,
-    process_service_result, process_unexpected_response,
-    session::services::*,
-    session::session_state::{ConnectionState, SessionState},
-    session_retry_policy::{Answer, SessionRetryPolicy},
-    subscription::{self, Subscription},
-    subscription_state::SubscriptionState,
-};
-
-macro_rules! session_warn {
-    ($session: expr, $($arg:tt)*) =>  {
-        warn!("{} {}", $session.session_id(), format!($($arg)*));
-    }
-}
-
-macro_rules! session_error {
-    ($session: expr, $($arg:tt)*) =>  {
-        error!("{} {}", $session.session_id(), format!($($arg)*));
-    }
-}
-
-macro_rules! session_debug {
-    ($session: expr, $($arg:tt)*) =>  {
-        debug!("{} {}", $session.session_id(), format!($($arg)*));
-    }
-}
-
-macro_rules! session_trace {
-    ($session: expr, $($arg:tt)*) =>  {
-        trace!("{} {}", $session.session_id(), format!($($arg)*));
-    }
-}
 
 /// Information about the server endpoint, security policy, security mode and user identity that the session will
 /// will use to establish a connection.
@@ -113,7 +93,7 @@ pub enum SessionCommand {
 /// when it is active. The `Session` struct provides functions for all the supported
 /// request types in the API.
 ///
-/// Note that not all servers may support all client side requests and calling an unsupported API
+/// Note that not all servers may support all service requests and calling an unsupported API
 /// may cause the connection to be dropped. Your client is expected to know the capabilities of
 /// the server it is calling to avoid this.
 ///
@@ -134,8 +114,6 @@ pub struct Session {
     certificate_store: Arc<RwLock<CertificateStore>>,
     /// Secure channel information.
     secure_channel: Arc<RwLock<SecureChannel>>,
-    /// Message queue.
-    message_queue: Arc<RwLock<MessageQueue>>,
     /// Session retry policy.
     session_retry_policy: Arc<Mutex<SessionRetryPolicy>>,
     /// Ignore clock skew between the client and the server.
@@ -177,8 +155,8 @@ impl Session {
         ignore_clock_skew: bool,
         single_threaded_executor: bool,
     ) -> Session
-    where
-        T: Into<UAString>,
+        where
+            T: Into<UAString>,
     {
         let session_name = session_name.into();
 
@@ -188,21 +166,17 @@ impl Session {
             decoding_options,
         )));
 
-        let message_queue = Arc::new(RwLock::new(MessageQueue::new()));
-
         let subscription_state = Arc::new(RwLock::new(SubscriptionState::new()));
 
         let session_state = Arc::new(RwLock::new(SessionState::new(
             ignore_clock_skew,
             secure_channel.clone(),
             subscription_state.clone(),
-            message_queue.clone(),
         )));
 
         let transport = TcpTransport::new(
             secure_channel.clone(),
             session_state.clone(),
-            message_queue.clone(),
             single_threaded_executor,
         );
 
@@ -221,7 +195,6 @@ impl Session {
             subscription_state,
             transport,
             secure_channel,
-            message_queue,
             session_retry_policy: Arc::new(Mutex::new(session_retry_policy)),
             ignore_clock_skew,
             single_threaded_executor,
@@ -241,8 +214,8 @@ impl Session {
             self.ignore_clock_skew,
             self.secure_channel.clone(),
             self.subscription_state.clone(),
-            self.message_queue.clone(),
         )));
+
         // Keep the existing transport, we should never drop a tokio runtime from a sync function
     }
 
@@ -281,8 +254,8 @@ impl Session {
     /// * `session_closed_callback` - the session closed callback
     ///
     pub fn set_session_closed_callback<CB>(&mut self, session_closed_callback: CB)
-    where
-        CB: OnSessionClosed + Send + Sync + 'static,
+        where
+            CB: OnSessionClosed + Send + Sync + 'static,
     {
         let mut session_state = trace_write_lock!(self.session_state);
         session_state.set_session_closed_callback(session_closed_callback);
@@ -296,8 +269,8 @@ impl Session {
     /// * `connection_status_callback` - the connection status callback.
     ///
     pub fn set_connection_status_callback<CB>(&mut self, connection_status_callback: CB)
-    where
-        CB: OnConnectionStatusChange + Send + Sync + 'static,
+        where
+            CB: OnConnectionStatusChange + Send + Sync + 'static,
     {
         let mut session_state = trace_write_lock!(self.session_state);
         session_state.set_connection_status_callback(connection_status_callback);
@@ -656,7 +629,7 @@ impl Session {
                     // Poll the session.
                     let poll_result = {
                         let mut session = session.write();
-                        session.poll()
+                        session.poll().await
                     };
                     match poll_result {
                         Ok(did_something) => {
@@ -728,9 +701,10 @@ impl Session {
     /// * `true` - if an action was performed during the poll
     /// * `false` - if no action was performed during the poll and the poll slept
     ///
-    pub fn poll(&mut self) -> Result<bool, ()> {
+    pub async fn poll(&mut self) -> Result<bool, ()> {
         let did_something = if self.is_connected() {
-            self.handle_publish_responses()
+            let mut session_state = trace_write_lock!(self.session_state);
+            session_state.handle_publish_responses()
         } else {
             let should_retry_connect = {
                 let session_retry_policy = trace_lock!(self.session_retry_policy);
@@ -809,52 +783,52 @@ impl Session {
         let id = format!("session-activity-thread-{:?}", thread::current().id());
         let runtime = trace_lock!(self.runtime);
         runtime.spawn(async move {
-                register_runtime_component!(&id);
-                // The timer runs at a higher frequency timer loop to terminate as soon after the session
-                // state has terminated. Each time it runs it will test if the interval has elapsed or not.
-                let session_activity_interval = Duration::from_millis(session_activity);
-                let mut timer = interval(Duration::from_millis(MIN_SESSION_ACTIVITY_MS));
-                let mut last_timeout = Instant::now();
+            register_runtime_component!(&id);
+            // The timer runs at a higher frequency timer loop to terminate as soon after the session
+            // state has terminated. Each time it runs it will test if the interval has elapsed or not.
+            let session_activity_interval = Duration::from_millis(session_activity);
+            let mut timer = interval(Duration::from_millis(MIN_SESSION_ACTIVITY_MS));
+            let mut last_timeout = Instant::now();
 
-                loop {
-                    timer.tick().await;
+            loop {
+                timer.tick().await;
 
-                    if connection_state.is_finished() {
-                        info!("Session activity timer is terminating");
-                        break;
-                    }
-
-                    // Get the time now
-                    let now = Instant::now();
-
-                    // Calculate to interval since last check
-                    let interval = now - last_timeout;
-                    if interval > session_activity_interval {
-                        match connection_state.state() {
-                            ConnectionState::Processing => {
-                                info!("Session activity keep-alive request");
-                                let mut session_state = trace_write_lock!(session_state);
-                                let request_header = session_state.make_request_header();
-                                let request = ReadRequest {
-                                    request_header,
-                                    max_age: 1f64,
-                                    timestamps_to_return: TimestampsToReturn::Server,
-                                    nodes_to_read: Some(vec![]),
-                                };
-                                // The response to this is ignored
-                                let _ = session_state.async_send_request(request, None);
-                            }
-                            connection_state => {
-                                info!("Session activity keep-alive is doing nothing - connection state = {:?}", connection_state);
-                            }
-                        };
-                        last_timeout = now;
-                    }
+                if connection_state.is_finished() {
+                    info!("Session activity timer is terminating");
+                    break;
                 }
 
-                info!("Session activity timer task is finished");
-                deregister_runtime_component!(&id);
-            });
+                // Get the time now
+                let now = Instant::now();
+
+                // Calculate to interval since last check
+                let interval = now - last_timeout;
+                if interval > session_activity_interval {
+                    match connection_state.state() {
+                        ConnectionState::Processing => {
+                            info!("Session activity keep-alive request");
+                            let mut session_state = trace_write_lock!(session_state);
+                            let request_header = session_state.make_request_header();
+                            let request = ReadRequest {
+                                request_header,
+                                max_age: 1f64,
+                                timestamps_to_return: TimestampsToReturn::Server,
+                                nodes_to_read: Some(vec![]),
+                            };
+                            // The response to this is ignored
+                            let _ = session_state.async_send_request(request, None);
+                        }
+                        connection_state => {
+                            info!("Session activity keep-alive is doing nothing - connection state = {:?}", connection_state);
+                        }
+                    };
+                    last_timeout = now;
+                }
+            }
+
+            info!("Session activity timer task is finished");
+            deregister_runtime_component!(&id);
+        });
     }
 
     /// Start a task that will periodically send a publish request to keep the subscriptions alive.
@@ -1221,117 +1195,6 @@ impl Session {
             pass,
         )
     }
-
-    // Process any async messages we expect to receive
-    fn handle_publish_responses(&mut self) -> bool {
-        let responses = {
-            let mut message_queue = trace_write_lock!(self.message_queue);
-            message_queue.async_responses()
-        };
-        if responses.is_empty() {
-            false
-        } else {
-            session_debug!(self, "Processing {} async messages", responses.len());
-            for response in responses {
-                self.handle_async_response(response);
-            }
-            true
-        }
-    }
-
-    /// This is the handler for asynchronous responses which are currently assumed to be publish
-    /// responses. It maintains the acknowledgements to be sent and sends the data change
-    /// notifications to the client for processing.
-    fn handle_async_response(&mut self, response: SupportedMessage) {
-        session_debug!(self, "handle_async_response");
-        match response {
-            SupportedMessage::PublishResponse(response) => {
-                session_debug!(self, "PublishResponse");
-
-                // Update subscriptions based on response
-                // Queue acknowledgements for next request
-                let notification_message = response.notification_message.clone();
-                let subscription_id = response.subscription_id;
-
-                // Queue an acknowledgement for this request (if it has data)
-                if let Some(ref notification_data) = notification_message.notification_data {
-                    if !notification_data.is_empty() {
-                        let mut session_state = trace_write_lock!(self.session_state);
-                        session_state.add_subscription_acknowledgement(
-                            SubscriptionAcknowledgement {
-                                subscription_id,
-                                sequence_number: notification_message.sequence_number,
-                            },
-                        );
-                    }
-                }
-
-                let decoding_options = {
-                    let secure_channel = trace_read_lock!(self.secure_channel);
-                    secure_channel.decoding_options()
-                };
-
-                // Process data change notifications
-                if let Some((data_change_notifications, events)) =
-                    notification_message.notifications(&decoding_options)
-                {
-                    session_debug!(
-                        self,
-                        "Received notifications, data changes = {}, events = {}",
-                        data_change_notifications.len(),
-                        events.len()
-                    );
-                    if !data_change_notifications.is_empty() {
-                        let mut subscription_state = trace_write_lock!(self.subscription_state);
-                        subscription_state
-                            .on_data_change(subscription_id, &data_change_notifications);
-                    }
-                    if !events.is_empty() {
-                        let mut subscription_state = trace_write_lock!(self.subscription_state);
-                        subscription_state.on_event(subscription_id, &events);
-                    }
-                }
-
-                // Send another publish request
-                {
-                    let mut session_state = trace_write_lock!(self.session_state);
-                    let _ = session_state.async_publish();
-                }
-            }
-            SupportedMessage::ServiceFault(response) => {
-                let service_result = response.response_header.service_result;
-                session_debug!(
-                    self,
-                    "Service fault received with {} error code",
-                    service_result
-                );
-                session_trace!(self, "ServiceFault {:?}", response);
-
-                match service_result {
-                    StatusCode::BadTimeout => {
-                        debug!("Publish request timed out so sending another");
-                        let mut session_state = trace_write_lock!(self.session_state);
-                        let _ = session_state.async_publish();
-                    }
-                    StatusCode::BadTooManyPublishRequests => {
-                        // Turn off publish requests until server says otherwise
-                        debug!("Server tells us too many publish requests so waiting for a response before resuming");
-                    }
-                    StatusCode::BadSessionClosed
-                    | StatusCode::BadSessionIdInvalid
-                    | StatusCode::BadNoSubscription
-                    | StatusCode::BadSubscriptionIdInvalid => {
-                        let mut session_state = trace_write_lock!(self.session_state);
-                        session_state.on_session_closed(service_result)
-                    }
-                    _ => (),
-                }
-            }
-            _ => {
-                info!("{} unhandled response", self.session_id());
-            }
-        }
-    }
 }
 
 impl Service for Session {
@@ -1589,7 +1452,6 @@ impl SessionService for Session {
         let locale_ids = if self.session_info.preferred_locales.is_empty() {
             None
         } else {
-            // Ids are
             let locale_ids = self
                 .session_info
                 .preferred_locales
@@ -1613,7 +1475,6 @@ impl SessionService for Session {
                 };
 
                 // Create a signature data
-                // let session_state = self.session_state.lock();
                 if client_pkey.is_none() {
                     session_error!(self, "Cannot create client signature - no pkey!");
                     return Err(StatusCode::BadUnexpectedError);
@@ -2467,24 +2328,7 @@ impl AttributeService for Session {
         nodes_to_read: &[HistoryReadValueId],
     ) -> Result<Vec<HistoryReadResult>, StatusCode> {
         // Turn the enum into an extension object
-        let history_read_details = match history_read_details {
-            HistoryReadAction::ReadEventDetails(v) => ExtensionObject::from_encodable(
-                ObjectId::ReadEventDetails_Encoding_DefaultBinary,
-                &v,
-            ),
-            HistoryReadAction::ReadRawModifiedDetails(v) => ExtensionObject::from_encodable(
-                ObjectId::ReadRawModifiedDetails_Encoding_DefaultBinary,
-                &v,
-            ),
-            HistoryReadAction::ReadProcessedDetails(v) => ExtensionObject::from_encodable(
-                ObjectId::ReadProcessedDetails_Encoding_DefaultBinary,
-                &v,
-            ),
-            HistoryReadAction::ReadAtTimeDetails(v) => ExtensionObject::from_encodable(
-                ObjectId::ReadAtTimeDetails_Encoding_DefaultBinary,
-                &v,
-            ),
-        };
+        let history_read_details = ExtensionObject::from(history_read_details);
         let request = HistoryReadRequest {
             request_header: self.make_request_header(),
             history_read_details,
@@ -2554,36 +2398,7 @@ impl AttributeService for Session {
             // Turn the enums into ExtensionObjects
             let history_update_details = history_update_details
                 .iter()
-                .map(|v| match v {
-                    HistoryUpdateAction::UpdateDataDetails(v) => ExtensionObject::from_encodable(
-                        ObjectId::UpdateDataDetails_Encoding_DefaultBinary,
-                        v,
-                    ),
-                    HistoryUpdateAction::UpdateStructureDataDetails(v) => {
-                        ExtensionObject::from_encodable(
-                            ObjectId::UpdateStructureDataDetails_Encoding_DefaultBinary,
-                            v,
-                        )
-                    }
-                    HistoryUpdateAction::UpdateEventDetails(v) => ExtensionObject::from_encodable(
-                        ObjectId::UpdateEventDetails_Encoding_DefaultBinary,
-                        v,
-                    ),
-                    HistoryUpdateAction::DeleteRawModifiedDetails(v) => {
-                        ExtensionObject::from_encodable(
-                            ObjectId::DeleteRawModifiedDetails_Encoding_DefaultBinary,
-                            v,
-                        )
-                    }
-                    HistoryUpdateAction::DeleteAtTimeDetails(v) => ExtensionObject::from_encodable(
-                        ObjectId::DeleteAtTimeDetails_Encoding_DefaultBinary,
-                        v,
-                    ),
-                    HistoryUpdateAction::DeleteEventDetails(v) => ExtensionObject::from_encodable(
-                        ObjectId::DeleteEventDetails_Encoding_DefaultBinary,
-                        v,
-                    ),
-                })
+                .map(|action|ExtensionObject::from(action))
                 .collect::<Vec<ExtensionObject>>();
 
             let request = HistoryUpdateRequest {

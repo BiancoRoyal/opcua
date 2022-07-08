@@ -17,9 +17,9 @@ where
     serialize_test_and_return_expected(value.clone(), value)
 }
 
-pub fn serialize_test_and_return_expected<T>(value: T, expected_value: T) -> T
+pub fn serialize_as_stream<T>(value: T) -> Cursor<Vec<u8>>
 where
-    T: BinaryEncoder<T> + Debug + PartialEq,
+    T: BinaryEncoder<T> + Debug,
 {
     // Ask the struct for its byte length
     let byte_len = value.byte_len();
@@ -40,9 +40,16 @@ where
     let actual = stream.into_inner();
     println!("value = {:?}", value);
     println!("encoded bytes = {:?}", actual);
-    let mut stream = Cursor::new(actual);
+    Cursor::new(actual)
+}
 
-    let decoding_options = DecodingOptions::default();
+pub fn serialize_test_and_return_expected<T>(value: T, expected_value: T) -> T
+where
+    T: BinaryEncoder<T> + Debug + PartialEq,
+{
+    let mut stream = serialize_as_stream(value);
+
+    let decoding_options = DecodingOptions::test();
     let new_value: T = T::decode(&mut stream, &decoding_options).unwrap();
     println!("new value = {:?}", new_value);
     assert_eq!(expected_value, new_value);

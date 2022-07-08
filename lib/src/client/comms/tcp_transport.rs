@@ -132,6 +132,7 @@ impl ReadState {
                 let chunks_len = self.chunks.len();
                 if self.max_chunk_count > 0 && chunks_len > self.max_chunk_count {
                     error!("too many chunks {}> {}", chunks_len, self.max_chunk_count);
+                    // TODO this code should return an error to be safe
                     //remove first
                     let first_req_id = *self.chunks.iter().next().unwrap().0;
                     self.chunks.remove(&first_req_id);
@@ -281,12 +282,16 @@ impl TcpTransport {
     pub fn new(
         secure_channel: Arc<RwLock<SecureChannel>>,
         session_state: Arc<RwLock<SessionState>>,
-        message_queue: Arc<RwLock<MessageQueue>>,
         single_threaded_executor: bool,
     ) -> TcpTransport {
         let connection_state = {
             let session_state = trace_read_lock!(session_state);
             session_state.connection_state()
+        };
+
+        let message_queue = {
+            let session_state = trace_read_lock!(session_state);
+            session_state.message_queue.clone()
         };
 
         let runtime = {
@@ -312,7 +317,7 @@ impl TcpTransport {
     pub fn connect(&self, endpoint_url: &str) -> Result<(), StatusCode> {
         debug_assert!(!self.is_connected(), "Should not try to connect when already connected");
         let (host, port) =
-            hostname_port_from_url(endpoint_url, constants::DEFAULT_OPC_UA_SERVER_PORT)?;
+            hostname_port_from_url(endpoint_url, crate::core::constants::DEFAULT_OPC_UA_SERVER_PORT)?;
 
         // Resolve the host name into a socket address
         let addr = {

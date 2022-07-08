@@ -14,18 +14,20 @@ use std::{
 use chrono::Duration;
 use tokio::time::Instant;
 
-use crate::core::{
-    comms::secure_channel::SecureChannel, handle::Handle, supported_message::SupportedMessage,
-};
-use crate::crypto::SecurityPolicy;
-use crate::sync::*;
-use crate::types::{status_code::StatusCode, *};
-
-use crate::client::{
-    callbacks::{OnConnectionStatusChange, OnSessionClosed},
-    message_queue::MessageQueue,
-    process_unexpected_response,
-    subscription_state::SubscriptionState,
+use crate::{
+    client::{
+        callbacks::{OnConnectionStatusChange, OnSessionClosed},
+        message_queue::MessageQueue,
+        process_unexpected_response,
+        session::{session_debug, session_trace},
+        subscription_state::SubscriptionState,
+    },
+    core::{
+        comms::secure_channel::SecureChannel, handle::Handle, supported_message::SupportedMessage,
+    },
+    crypto::SecurityPolicy,
+    sync::*,
+    types::{status_code::StatusCode, *},
 };
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -126,12 +128,12 @@ pub(crate) struct SessionState {
     subscription_acknowledgements: Vec<SubscriptionAcknowledgement>,
     /// Subscription state
     subscription_state: Arc<RwLock<SubscriptionState>>,
-    /// The message queue
-    message_queue: Arc<RwLock<MessageQueue>>,
     /// Connection closed callback
     session_closed_callback: Option<Box<dyn OnSessionClosed + Send + Sync + 'static>>,
     /// Connection status callback
     connection_status_callback: Option<Box<dyn OnConnectionStatusChange + Send + Sync + 'static>>,
+    /// Message queue.
+    pub(crate) message_queue: Arc<RwLock<MessageQueue>>,
 }
 
 impl OnSessionClosed for SessionState {
@@ -157,13 +159,11 @@ impl SessionState {
     const SEND_BUFFER_SIZE: usize = 65535;
     const RECEIVE_BUFFER_SIZE: usize = 65535;
     const MAX_BUFFER_SIZE: usize = 65535;
-    const MAX_CHUNK_COUNT: usize = 0;
 
     pub fn new(
         ignore_clock_skew: bool,
         secure_channel: Arc<RwLock<SecureChannel>>,
         subscription_state: Arc<RwLock<SubscriptionState>>,
-        message_queue: Arc<RwLock<MessageQueue>>,
     ) -> SessionState {
         let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
         SessionState {
@@ -176,16 +176,16 @@ impl SessionState {
             send_buffer_size: Self::SEND_BUFFER_SIZE,
             receive_buffer_size: Self::RECEIVE_BUFFER_SIZE,
             max_message_size: Self::MAX_BUFFER_SIZE,
-            max_chunk_count: Self::MAX_CHUNK_COUNT,
+            max_chunk_count: constants::MAX_CHUNK_COUNT,
             request_handle: Handle::new(Self::FIRST_REQUEST_HANDLE),
             session_id: NodeId::null(),
             authentication_token: NodeId::null(),
             monitored_item_handle: Handle::new(Self::FIRST_MONITORED_ITEM_HANDLE),
             subscription_acknowledgements: Vec::new(),
             subscription_state,
-            message_queue,
             session_closed_callback: None,
             connection_status_callback: None,
+            message_queue: Arc::new(RwLock::new(MessageQueue::new())),
         }
     }
 
@@ -270,9 +270,8 @@ impl SessionState {
             timestamp: DateTime::now_with_offset(self.client_offset),
             request_handle: self.request_handle.next(),
             return_diagnostics: DiagnosticBits::empty(),
-            audit_entry_id: UAString::null(),
             timeout_hint: self.request_timeout,
-            additional_header: ExtensionObject::null(),
+            ..Default::default()
         }
     }
 
@@ -490,6 +489,109 @@ impl SessionState {
             Ok(())
         } else {
             Err(process_unexpected_response(response))
+        }
+    }
+
+    // Process any async messages we expect to receive
+    pub(crate) fn handle_publish_responses(&mut self) -> bool {
+        let responses = {
+            let mut message_queue = trace_write_lock!(self.message_queue);
+            message_queue.async_responses()
+        };
+        if responses.is_empty() {
+            false
+        } else {
+            session_debug!(self, "Processing {} async messages", responses.len());
+            for response in responses {
+                self.handle_async_response(response);
+            }
+            true
+        }
+    }
+
+    /// This is the handler for asynchronous responses which are currently assumed to be publish
+    /// responses. It maintains the acknowledgements to be sent and sends the data change
+    /// notifications to the client for processing.
+    fn handle_async_response(&mut self, response: SupportedMessage) {
+        session_debug!(self, "handle_async_response");
+        match response {
+            SupportedMessage::PublishResponse(response) => {
+                session_debug!(self, "PublishResponse");
+
+                // Update subscriptions based on response
+                // Queue acknowledgements for next request
+                let notification_message = response.notification_message.clone();
+                let subscription_id = response.subscription_id;
+
+                // Queue an acknowledgement for this request (if it has data)
+                if let Some(ref notification_data) = notification_message.notification_data {
+                    if !notification_data.is_empty() {
+                        self.add_subscription_acknowledgement(SubscriptionAcknowledgement {
+                            subscription_id,
+                            sequence_number: notification_message.sequence_number,
+                        });
+                    }
+                }
+
+                let decoding_options = {
+                    let secure_channel = trace_read_lock!(self.secure_channel);
+                    secure_channel.decoding_options()
+                };
+
+                // Process data change notifications
+                if let Some((data_change_notifications, events)) =
+                    notification_message.notifications(&decoding_options)
+                {
+                    session_debug!(
+                        self,
+                        "Received notifications, data changes = {}, events = {}",
+                        data_change_notifications.len(),
+                        events.len()
+                    );
+                    if !data_change_notifications.is_empty() {
+                        let mut subscription_state = trace_write_lock!(self.subscription_state);
+                        subscription_state
+                            .on_data_change(subscription_id, &data_change_notifications);
+                    }
+                    if !events.is_empty() {
+                        let mut subscription_state = trace_write_lock!(self.subscription_state);
+                        subscription_state.on_event(subscription_id, &events);
+                    }
+                }
+
+                // Send another publish request
+                let _ = self.async_publish();
+            }
+            SupportedMessage::ServiceFault(response) => {
+                let service_result = response.response_header.service_result;
+                session_debug!(
+                    self,
+                    "Service fault received with {} error code",
+                    service_result
+                );
+                session_trace!(self, "ServiceFault {:?}", response);
+
+                match service_result {
+                    StatusCode::BadTimeout => {
+                        debug!("Publish request timed out so sending another");
+                        let _ = self.async_publish();
+                    }
+                    StatusCode::BadTooManyPublishRequests => {
+                        // Turn off publish requests until server says otherwise
+                        debug!("Server tells us too many publish requests so waiting for a response before resuming");
+                    }
+                    StatusCode::BadSessionClosed
+                    | StatusCode::BadSessionIdInvalid
+                    | StatusCode::BadNoSubscription
+                    | StatusCode::BadSubscriptionIdInvalid => {
+                        self.on_session_closed(service_result)
+                    }
+                    _ => (),
+                }
+            }
+            _ => {
+                info!("{} unhandled response", self.session_id());
+            }
         }
     }
 

@@ -112,8 +112,8 @@ impl Server {
         let diagnostics = Arc::new(RwLock::new(ServerDiagnostics::default()));
         let min_publishing_interval_ms = config.limits.min_publishing_interval * 1000.0;
         let min_sampling_interval_ms = config.limits.min_sampling_interval * 1000.0;
-
-        // TODO max string, byte string and array lengths
+        let send_buffer_size = config.limits.send_buffer_size;
+        let receive_buffer_size = config.limits.receive_buffer_size;
 
         // Security, pki auto create cert
         let application_description = if config.create_sample_keypair {
@@ -182,6 +182,8 @@ impl Server {
             historical_data_provider: None,
             historical_event_provider: None,
             operational_limits: OperationalLimits::default(),
+            send_buffer_size,
+            receive_buffer_size,
         };
         let server_state = Arc::new(RwLock::new(server_state));
 
