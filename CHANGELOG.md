@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12
+- JSON serialization of most built-in data types
+- Update to Rust 2021 profile
+
+## 0.11
+- Security - enforcement of decoding limits on deeply nested or large arrays & strings  
+- Use `parking_lot` versions of `RwLock` and `Mutex`
+- Various bug fixes supplied by contributors
+- Looser tokio requirements to allow clients & servers to use their own versions instead of specific versions of tokio 
+
 ## 0.10
 - Starting from 0.10, OPC UA for Rust is a single crate with features to enable client, server and some other optional extras. What this means is
   that `opcua_server::` becomes `opcua::server`, `opcua_client` becomes `opcua::client` and so on. Now you only reference `opcua` from your `Cargo.toml`.
