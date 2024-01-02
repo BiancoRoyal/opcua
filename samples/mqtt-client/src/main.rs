@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2022 Adam Lock
+// Copyright (C) 2017-2024 Adam Lock
 
 //! This is a sample OPC UA Client that connects to the specified server, fetches some
 //! values before exiting.
@@ -58,7 +58,7 @@ Usage:
     }
 }
 
-const DEFAULT_CONFIG_FILE: &str = "../client.conf/";
+const DEFAULT_CONFIG_FILE: &str = "../client.conf";
 const DEFAULT_MQTT_HOST: &str = "broker.hivemq.com";
 const DEFAULT_MQTT_PORT: u16 = 1883;
 

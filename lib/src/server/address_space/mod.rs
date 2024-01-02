@@ -1,6 +1,6 @@
 // OPCUA for Rust
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (C) 2017-2022 Adam Lock
+// Copyright (C) 2017-2024 Adam Lock
 
 //! Provides functionality to create an address space, find nodes, add nodes, change attributes
 //! and values on nodes.
@@ -484,6 +484,7 @@ bitflags! {
 }
 
 bitflags! {
+    #[derive(Debug, Clone, Copy)]
     pub struct EventNotifier: u8 {
         const SUBSCRIBE_TO_EVENTS = 1;
         const HISTORY_READ = 4;
