@@ -60,6 +60,7 @@
             status("Websocket Error");
             $("#disconnect_btn").prop("disabled", true);
             $("#subscribe_btn").prop("disabled", true);
+            $("#subscribe_stress_btn").prop("disabled", true);
             $("#add_event_btn").prop("disabled", true);
             $("#connect_btn").prop("disabled", true);
         };
@@ -78,6 +79,7 @@
         $("#connect_btn").prop("disabled", connected);
         $("#disconnect_btn").prop("disabled", !connected);
         $("#subscribe_btn").prop("disabled", !connected);
+        $("#subscribe_stress_btn").prop("disabled", !connected);
         $("#add_event_btn").prop("disabled", !connected);
     }
 
@@ -92,6 +94,20 @@
 
     function subscribe(values) {
         ws.send(`subscribe ${values}`);
+    }
+
+    function subscribe_stress() {
+        let values = "";
+
+        for (let r = 0; r < 20; r++) {
+            let j = 100 * r;
+            let i_max = j + 100;
+            for (let i = j; i < i_max; i++) {
+                values += "ns=2;s=v" + String(i).padStart(4, '0') + ",";
+            }
+            values.replace(/,$/, '');
+            ws.send(`subscribe ${values}`);
+        }
     }
 
     function handle_event(e) {
@@ -226,6 +242,14 @@
                 </td>
                 <td>
                     <button disabled="disabled" id="subscribe_btn" onclick="subscribe($('#subscribe_values').val())">
+                        Subscribe to data change
+                    </button>
+                </td>
+            </tr>
+            <tr>
+                <td>Subscribe Stress 3000 Variables</td>
+                <td>
+                    <button disabled="disabled" id="subscribe_stress_btn" onclick="subscribe_stress()">
                         Subscribe to data change
                     </button>
                 </td>

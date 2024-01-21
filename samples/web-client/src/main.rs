@@ -428,7 +428,9 @@ impl OPCUASession {
                 // Create some monitored items
                 let items_to_create: Vec<MonitoredItemCreateRequest> = node_ids
                     .iter()
+                    .filter(|node_id| !node_id.is_empty())
                     .map(|node_id| {
+                        println!("NodeId: {}", node_id);
                         let node_id = NodeId::from_str(node_id).unwrap(); // Trust client to not break this
                         node_id.into()
                     })

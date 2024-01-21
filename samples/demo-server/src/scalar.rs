@@ -293,7 +293,7 @@ fn set_dynamic_timers(server: &mut Server, ns: u16) {
 }
 
 pub fn add_stress_variables(server: &mut Server, ns: u16) {
-    let node_ids = (0..1000)
+    let node_ids = (0..8000)
         .map(|i| NodeId::new(ns, format!("v{:04}", i)))
         .collect::<Vec<NodeId>>();
 
