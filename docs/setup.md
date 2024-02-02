@@ -50,7 +50,12 @@ Package names may vary by dist but as you can see there isn't much to setup.
 ## OpenSSL 
 
 The major external dependency is OpenSSL. If you have trouble building the `openssl-*` crates or trouble running
-them then refer to that project's [documentation](https://docs.rs/openssl/0.10.26/openssl/). 
+them then refer to that project's [documentation](https://docs.rs/openssl/0.10.26/openssl/).
+
+On error: failed to run custom build command for `openssl-sys v0.9.x`
+check https://docs.rs/openssl/latest/openssl/
+
+Mostly it was fixed after this: `sudo apt-get install pkg-config libssl-dev`
 
 ## Vendored OpenSSL
 
