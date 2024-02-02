@@ -7,6 +7,7 @@
 //! a timer that updates those variables so anything monitoring variables sees the values changing.
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use opcua::server::prelude::*;
 use opcua::sync::Mutex;
@@ -37,10 +38,11 @@ fn main() {
 /// Creates some sample variables, and some push / pull examples that update them
 fn add_example_variables(server: &mut Server, ns: u16) {
     // These will be the node ids of the new variables
-    let v1_node = NodeId::new(ns, "v1");
-    let v2_node = NodeId::new(ns, "v2");
-    let v3_node = NodeId::new(ns, "v3");
-    let v4_node = NodeId::new(ns, "v4");
+    //let v1_node = NodeId::new(ns, "v1");
+    //let v2_node = NodeId::new(ns, "v2");
+    //let v3_node = NodeId::new(ns, "v3");
+    //let v4_node = NodeId::new(ns, "v4");
+    let mut node_names: Vec<NodeId> = vec![];
 
     let address_space = server.address_space();
 
@@ -53,14 +55,24 @@ fn add_example_variables(server: &mut Server, ns: u16) {
             .add_folder("Sample", "Sample", &NodeId::objects_folder_id())
             .unwrap();
 
+
+        let mut variables: Vec<Variable> = vec![];
+
+        let base = String::from("v");
+        for n in 0..8000 {
+            let id = n.to_string();
+            let mut display_name = base.clone();
+            display_name.push_str(&id);
+
+            let var_name = display_name.clone();
+            let disp_name = display_name.clone();
+
+            node_names.push(NodeId::new(ns, display_name));
+            variables.push(Variable::new(&node_names[n], var_name, disp_name, false));
+        }
         // Add some variables to our sample folder. Values will be overwritten by the timer
         let _ = address_space.add_variables(
-            vec![
-                Variable::new(&v1_node, "v1", "v1", 0 as i32),
-                Variable::new(&v2_node, "v2", "v2", false),
-                Variable::new(&v3_node, "v3", "v3", UAString::from("")),
-                Variable::new(&v4_node, "v4", "v4", 0f64),
-            ],
+            variables,
             &sample_folder_id,
         );
     }
@@ -73,37 +85,42 @@ fn add_example_variables(server: &mut Server, ns: u16) {
     {
         let address_space = server.address_space();
         let mut address_space = address_space.write();
-        if let Some(ref mut v) = address_space.find_variable_mut(v3_node.clone()) {
-            // Hello world's counter will increment with each get - slower interval == slower increment
-            let mut counter = 0;
-            let getter = AttrFnGetter::new(
-                move |_, _, _, _, _, _| -> Result<Option<DataValue>, StatusCode> {
-                    counter += 1;
-                    Ok(Some(DataValue::new_now(UAString::from(format!(
-                        "Hello World times {}",
-                        counter
-                    )))))
-                },
-            );
-            v.set_value_getter(Arc::new(Mutex::new(getter)));
+        for node in node_names.clone() {
+            if let Some(ref mut v) = address_space.find_variable_mut(node.clone()) {
+                // Hello world's counter will increment with each get - slower interval == slower increment
+                let mut counter = 0;
+                let getter = AttrFnGetter::new(
+                    move |_, _, _, _, _, _| -> Result<Option<DataValue>, StatusCode> {
+                        counter += 1;
+                        Ok(Some(DataValue::new_now(UAString::from(format!(
+                            "Hello World times {}",
+                            counter
+                        )))))
+                    },
+                );
+                v.set_value_getter(Arc::new(Mutex::new(getter)));
+            }
         }
 
-        if let Some(ref mut v) = address_space.find_variable_mut(v4_node.clone()) {
-            // Sine wave draws 2*PI over course of 10 seconds
-            use chrono::Utc;
-            use std::f64::consts;
-            let start_time = Utc::now();
-            let getter = AttrFnGetter::new(
-                move |_, _, _, _, _, _| -> Result<Option<DataValue>, StatusCode> {
-                    let elapsed = Utc::now()
-                        .signed_duration_since(start_time)
-                        .num_milliseconds();
-                    let moment = (elapsed % 10000) as f64 / 10000.0;
-                    Ok(Some(DataValue::new_now((2.0 * consts::PI * moment).sin())))
-                },
-            );
-            v.set_value_getter(Arc::new(Mutex::new(getter)));
+        for node in node_names.clone() {
+            if let Some(ref mut v) = address_space.find_variable_mut(node.clone()) {
+                // Sine wave draws 2*PI over course of 10 seconds
+                use chrono::Utc;
+                use std::f64::consts;
+                let start_time = Utc::now();
+                let getter = AttrFnGetter::new(
+                    move |_, _, _, _, _, _| -> Result<Option<DataValue>, StatusCode> {
+                        let elapsed = Utc::now()
+                            .signed_duration_since(start_time)
+                            .num_milliseconds();
+                        let moment = (elapsed % 10000) as f64 / 10000.0;
+                        Ok(Some(DataValue::new_now((2.0 * consts::PI * moment).sin())))
+                    },
+                );
+                v.set_value_getter(Arc::new(Mutex::new(getter)));
+            }
         }
+
     }
 
     // 2) Push. This code will use a timer to set the values on variable v1 & v2 on an interval.
@@ -111,15 +128,19 @@ fn add_example_variables(server: &mut Server, ns: u16) {
     //    contains a simple add_polling_action for your convenience.
     {
         // Store a counter and a flag in a tuple
-        let data = Arc::new(Mutex::new((0, true)));
-        server.add_polling_action(300, move || {
-            let mut data = data.lock();
-            data.0 += 1;
-            data.1 = !data.1;
-            let mut address_space = address_space.write();
-            let now = DateTime::now();
-            let _ = address_space.set_variable_value(v1_node.clone(), data.0 as i32, &now, &now);
-            let _ = address_space.set_variable_value(v2_node.clone(), data.1, &now, &now);
-        });
+
+
+            let data = Arc::new(Mutex::new((0, false)));
+            server.add_polling_action(100, move || {
+                for node in node_names.clone() {
+                    let mut data = data.lock();
+                    data.0 += 1;
+                    data.1 = !data.1;
+                    let mut address_space = address_space.write();
+                    let now = DateTime::now();
+                    let success = address_space.set_variable_value(node.clone(), data.0 as i32, &now, &now);
+                    let _ = address_space.set_variable_value(node.clone(), data.1, &now, &now);
+                }
+            });
     }
 }
